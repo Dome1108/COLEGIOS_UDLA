@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+streamlit_out.log
+streamlit_err.log
+~$*.xlsx
+~$*.xls
+4.2.0
