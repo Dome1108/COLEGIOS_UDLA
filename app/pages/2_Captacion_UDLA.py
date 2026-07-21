@@ -216,8 +216,18 @@ else:
         "Año", "Colegios", "Graduados", "% var. Graduados", "Leads", "% var. Leads",
         "Afluentes", "% var. Afluentes", "Documentados", "% var. Documentados",
     ]]
+    def _fondo_variacion(val):
+        if pd.isna(val):
+            return ""
+        if val < 0:
+            return "background-color: rgba(176, 116, 90, 0.20)"  # rojo tenue (tono COLOR_ALERTA)
+        if val > 0:
+            return "background-color: rgba(76, 140, 107, 0.20)"  # verde tenue (tono COLOR_EXITO)
+        return ""
+
+    COLUMNAS_VARIACION = ["% var. Graduados", "% var. Leads", "% var. Afluentes", "% var. Documentados"]
     st.dataframe(
-        tabla_anual.style.format({
+        tabla_anual.style.map(_fondo_variacion, subset=COLUMNAS_VARIACION).format({
             "Colegios": "{:,.0f}", "Graduados": "{:,.0f}", "Leads": "{:,.0f}",
             "Afluentes": "{:,.0f}", "Documentados": "{:,.0f}",
             "% var. Graduados": "{:+.1f}%", "% var. Leads": "{:+.1f}%",
