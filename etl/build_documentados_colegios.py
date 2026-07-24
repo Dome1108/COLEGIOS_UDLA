@@ -1,15 +1,13 @@
-"""ETL: extrae DwhStage..DocumentadosColegiosMINEDU (autenticacion Windows) y
-construye:
-- documentados_colegios_detalle.parquet: grano estudiante (IdBanner), tal cual.
-- documentados_colegios_resumen.parquet: grano (PeriodoBanner_Sales, codigo_colegio).
-  El funnel L/A/D se SUMA entre los distintos CodBanner de un mismo colegio+periodo
-  (su granularidad real); las estadisticas del colegio (Graduados, etc.) se
-  mantienen con "first" (constantes, sumarlas las inflaria). Nunca se suma
-  nada a nivel de fila de estudiante (eso si esta repetido sin mas informacion).
+"""DwhStage..DocumentadosColegiosMINEDU_Nuevo (autenticacion Windows) y
 
 codigo_colegio = COALESCE(CodColegioBanner_Sales, CodColegioAMIED) -- en ese
-orden de prioridad, segun lo indicado: CodColegioBanner_Sales primero, y si
+orden de prioridad, CodColegioBanner_Sales primero, y si
 no hay dato ahi, se usa CodColegioAMIED.
+
+
+Leads (L) y Afluentes (A) si son agregados a nivel colegio (como Graduados):
+se repiten iguales en todas las filas de un mismo periodo+colegio, así que se
+toman con "first", nunca se suman a nivel fila de estudiante.
 """
 import os
 from pathlib import Path
@@ -27,35 +25,30 @@ load_dotenv(BASE_DIR / ".env")
 
 DB_SERVER = os.getenv("DB_SERVER")
 DB_NAME = os.getenv("DB_NAME")
-TABLA = "DwhStage..DocumentadosColegiosMINEDU"
+TABLA = "DwhStage..DocumentadosColegiosMINEDU_Nuevo"
 
-# La tabla origen trae dos tipos de campo pre-agregado, con granularidades
-# DISTINTAS -- confirmado empiricamente (ver notebooks/investigacion CodBanner):
-#
-# 1) Funnel L/A/D: la granularidad real es (PeriodoBanner_Sales, codigo_colegio,
-#    CodBanner) -- un mismo AMIE puede tener varios CodBanner (registros
-#    distintos en Banner) en el mismo periodo, cada uno con su propio L/A/D.
-#    Hay que sumar entre CodBanner para no perder informacion (antes de este
-#    fix, tomar "first" a nivel (periodo,colegio) subestimaba D en ~7%
-#    nacional -- 16,886 vs 18,066 en 2022-2024).
-# 2) Estadisticas del colegio (Graduados, etc.): constantes por
-#    (PeriodoBanner_Sales, codigo_colegio) sin importar el CodBanner -- se
-#    usa "first", sumar las inflaria (es el mismo dato de MINEDUC repetido).
-CAMPOS_FUNNEL = ["L", "A", "D"]
+##############################
+## CLASIFICACIÓN DE CAMPO
+##############################
+
+# Agregados a nivel (PeriodoBanner_Sales, codigo_colegio) -- se usa "first"
+# para todos, nunca se suma nada a nivel de fila de estudiante.
 CAMPOS_COLEGIO_CONSTANTES = [
+    "L", "A",
     "EstudiantesFemeninoTercerAñoBACH",
     "EstudiantesMasculinoTercerAñoBACH",
     "GraduadosColegioAMIED",
-    "TotalDocumentadosPeriodo",  # comportamiento mixto -- ver aviso en consola
 ]
 
 CAMPOS_METADATA_COLEGIO = [
     "NombreInstitucionAMIED", "ProvinciaAMIED", "CantonAMIED", "ZonaInecAMIED",
-    "RegimenAMIED", "Sostenimiento", "Nuevo_cluster", "BACHILLERATO PENSIÓN",
+    "RegimenAMIED", "Sostenimiento", "Cluster", "BACHILLERATO PENSIÓN",
     "RangoPension", "AñoGraduacionAMIED",
 ]
 
-
+#############################
+## AUTENTIFICACIÓN Y CONEXIÓN
+#############################
 def get_engine_windows_auth():
     if not DB_SERVER or not DB_NAME:
         raise RuntimeError(
@@ -65,51 +58,49 @@ def get_engine_windows_auth():
     conn_str = f"mssql+pyodbc://@{DB_SERVER}/{DB_NAME}?driver={driver}&trusted_connection=yes"
     return create_engine(conn_str)
 
-
+#############################
+## EXTRACCIÓN DE LA TABLA
+#############################
 def extraer_detalle(engine) -> pd.DataFrame:
     return pd.read_sql(f"SELECT * FROM {TABLA}", engine)
 
-
+#############################
+## CODAMIE, SI ES NULO TOMA EL SIGUIENTE
+#############################
 def agregar_codigo_colegio(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["codigo_colegio"] = df["CodColegioBanner_Sales"].fillna(df["CodColegioAMIED"])
     return df
 
-
+############################
+## TABLA RESUMEN
+############################
 def construir_resumen(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["codigo_colegio"])
 
-    # Paso 1: colapsar a la granularidad REAL (periodo, colegio, CodBanner).
-    nivel_codbanner = (
-        df.groupby(["PeriodoBanner_Sales", "codigo_colegio", "CodBanner"], dropna=False)
-        .agg({col: "first" for col in CAMPOS_FUNNEL + CAMPOS_COLEGIO_CONSTANTES + CAMPOS_METADATA_COLEGIO})
-        .reset_index()
-    )
-
-    # Paso 2: subir a (periodo, colegio) -- SUMAR el funnel entre CodBanner,
-    # mantener "first" para las estadisticas constantes del colegio y su metadata.
-    agg_map = {col: "sum" for col in CAMPOS_FUNNEL}
-    agg_map.update({col: "first" for col in CAMPOS_COLEGIO_CONSTANTES + CAMPOS_METADATA_COLEGIO})
     resumen = (
-        nivel_codbanner.groupby(["PeriodoBanner_Sales", "codigo_colegio"], dropna=False)
-        .agg(agg_map)
+        df.groupby(["PeriodoBanner_Sales", "codigo_colegio"], dropna=False)
+        .agg({
+            **{col: "first" for col in CAMPOS_COLEGIO_CONSTANTES + CAMPOS_METADATA_COLEGIO},
+            "IdBanner": "nunique",
+        })
         .reset_index()
     )
+    ## Renombro columnas--------------------------------------------
     resumen = resumen.rename(columns={
         "EstudiantesFemeninoTercerAñoBACH": "graduados_mujeres",
         "EstudiantesMasculinoTercerAñoBACH": "graduados_hombres",
         "GraduadosColegioAMIED": "graduados_total",
-        "TotalDocumentadosPeriodo": "documentados",
+        "IdBanner": "documentados",
         "L": "leads",
         "A": "afluentes",
-        "D": "documentados_d",
         "NombreInstitucionAMIED": "nombre_institucion",
         "ProvinciaAMIED": "provincia",
         "CantonAMIED": "canton",
         "ZonaInecAMIED": "zona",
         "RegimenAMIED": "regimen",
         "Sostenimiento": "sostenimiento",
-        "Nuevo_cluster": "cluster",
+        "Cluster": "cluster",
         "BACHILLERATO PENSIÓN": "pension",
         "RangoPension": "rango_pension",
         "AñoGraduacionAMIED": "anio_graduacion_mineduc",
@@ -142,8 +133,7 @@ def main():
     print(
         f"Totales nacionales -> Leads: {resumen['leads'].sum():,.0f}  "
         f"Afluentes: {resumen['afluentes'].sum():,.0f}  "
-        f"Documentados (D, funnel): {resumen['documentados_d'].sum():,.0f}  "
-        f"Documentados (TotalDocumentadosPeriodo): {resumen['documentados'].sum():,.0f}"
+        f"Documentados (conteo IdBanner, con colegio): {resumen['documentados'].sum():,.0f}"
     )
 
     detalle_path = DATA_DIR / "documentados_colegios_detalle.parquet"

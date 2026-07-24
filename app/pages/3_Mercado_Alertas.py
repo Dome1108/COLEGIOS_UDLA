@@ -31,6 +31,9 @@ anios_disponibles = sorted(resumen["anio"].unique())
 anio_actual_default = anios_disponibles[-2] if len(anios_disponibles) > 1 else anios_disponibles[-1]
 anio_anterior_default = anios_disponibles[-3] if len(anios_disponibles) > 2 else anios_disponibles[0]
 
+##########################
+## TRAIGO LOS CAMPOS
+##########################
 cols_filtro = st.columns([2, 1.3, 1.3, 1, 1, 1, 1])
 with cols_filtro[0]:
     colegios_nombres = sorted(resumen["nombre_institucion"].dropna().unique().tolist())
@@ -52,6 +55,10 @@ with cols_filtro[6]:
     rangos_pension = sorted(resumen["rango_pension"].dropna().unique().tolist())
     rango_pension_sel = st.multiselect("Rango pensión", rangos_pension)
 
+
+##############################
+## CUADRANTES
+##############################
 CUADRANTES_TODOS = [
     "Mercado crece + UDLA crece",
     "Mercado cae + UDLA crece",
@@ -73,30 +80,61 @@ for col, sel in [
     if sel:
         filtrado = filtrado[filtrado[col].isin(sel)]
 
+# --- Colapsar a (anio, codigo_colegio) ---
+# "documentados" toma TotalDocumentadosPeriodo (ya viene con "first" a nivel
+# periodo+colegio desde el ETL -- ver etl/build_documentados_colegios.py). Los
+# periodos "10" y "20" del mismo año SI son aditivos para documentados (son 2
+# ciclos de admision distintos, cada uno con su propio total). PERO
+# graduados_total es una constante anual del colegio -- se repite igual en la
+# fila del periodo 10 y en la del periodo 20 (confirmado contra datos reales)
+# -- por eso graduados usa "first", no "sum": sumarlo entre los 2 periodos
+# duplicaria el dato.
+por_anio_colegio = (
+    filtrado.groupby(["anio", "codigo_colegio"])
+    .agg(
+        nombre_institucion=("nombre_institucion", "first"),
+        provincia=("provincia", "first"),
+        canton=("canton", "first"),
+        sostenimiento=("sostenimiento", "first"),
+        cluster=("cluster", "first"),
+        graduados=("graduados_total", "first"),
+        documentados=("documentados", "sum"),
+    )
+    .reset_index()
+)
+################################
+## TABLA ANUAL
+################################
 # --- Tabla anual: valores + % de variación interanual (independiente del año base/comparado de abajo) ---
 st.subheader("Tabla anual")
 st.caption(
     "Usa TODOS los años disponibles para los colegios que queden en el filtro de Colegio/Provincia/Sostenimiento/"
-    "Cluster/Rango pensión (no depende de Año base/comparado). Ordenable por cualquier columna (clic en el encabezado)."
+    "Cluster/Rango pensión (no depende de Año base/comparado). Cada colegio se cuenta una sola vez por año "
+    "(no se duplica entre los periodos 10 y 20). Ordenable por cualquier columna (clic en el encabezado)."
 )
 por_anio_tabla = (
-    filtrado.groupby("anio")
+    por_anio_colegio.groupby("anio")
     .agg(
         colegios=("codigo_colegio", "nunique"),
-        graduados=("graduados_total", "sum"),
-        documentados=("documentados_d", "sum"),
+        graduados=("graduados", "sum"),
+        documentados=("documentados", "sum"),
     )
     .reset_index()
     .sort_values("anio")
 )
 por_anio_tabla["var_graduados_pct"] = por_anio_tabla["graduados"].pct_change().mul(100).round(1)
 por_anio_tabla["var_documentados_pct"] = por_anio_tabla["documentados"].pct_change().mul(100).round(1)
+graduados_seguro_tabla = por_anio_tabla["graduados"].mask(por_anio_tabla["graduados"] == 0)
+por_anio_tabla["captacion_pct"] = (por_anio_tabla["documentados"] / graduados_seguro_tabla * 100).round(1)
 tabla_anual = por_anio_tabla.sort_values("anio", ascending=False).rename(columns={
     "anio": "Año", "colegios": "Colegios", "graduados": "Graduados", "documentados": "Documentados",
     "var_graduados_pct": "% var. Graduados", "var_documentados_pct": "% var. Documentados",
-})[["Año", "Colegios", "Graduados", "% var. Graduados", "Documentados", "% var. Documentados"]]
+    "captacion_pct": "% captación",
+})[["Año", "Colegios", "Graduados", "% var. Graduados", "Documentados", "% var. Documentados", "% captación"]]
 
-
+#################################
+## CONSTRUCCIÓN DE LOS CUADRANTES - CARTESIANO
+#################################
 def _fondo_variacion(val):
     if pd.isna(val):
         return ""
@@ -110,28 +148,13 @@ def _fondo_variacion(val):
 st.dataframe(
     tabla_anual.style.map(_fondo_variacion, subset=["% var. Graduados", "% var. Documentados"]).format({
         "Colegios": "{:,.0f}", "Graduados": "{:,.0f}", "Documentados": "{:,.0f}",
-        "% var. Graduados": "{:+.1f}%", "% var. Documentados": "{:+.1f}%",
+        "% var. Graduados": "{:+.1f}%", "% var. Documentados": "{:+.1f}%", "% captación": "{:.1f}%",
     }, na_rep="—"),
     width="stretch", hide_index=True,
 )
-
-# "documentados" toma el campo D (funnel L->A->D, corregido para sumar entre
-# CodBanner -- ver etl/build_documentados_colegios.py), igual que en la pagina
-# de Captacion UDLA, para que ambas paginas sean consistentes.
-por_anio_colegio = (
-    filtrado.groupby(["anio", "codigo_colegio"])
-    .agg(
-        nombre_institucion=("nombre_institucion", "first"),
-        provincia=("provincia", "first"),
-        canton=("canton", "first"),
-        sostenimiento=("sostenimiento", "first"),
-        cluster=("cluster", "first"),
-        graduados=("graduados_total", "sum"),
-        documentados=("documentados_d", "sum"),
-    )
-    .reset_index()
-)
-
+###########################
+## MODO TRAYECTORIA
+##########################
 modo_trayectoria = not anios_base_sel and not anios_actual_sel
 if not modo_trayectoria and (not anios_base_sel or not anios_actual_sel):
     st.warning("Elige al menos un año base y un año comparado (o deja ambos vacíos para ver la trayectoria completa).")
@@ -169,6 +192,9 @@ else:
     etiqueta_base = "+".join(anios_base_sel)
     etiqueta_actual = "+".join(anios_actual_sel)
 
+########################
+## MODO COMPARACIÓN
+########################
     # Si se eligen varios años en un grupo (base o actual), se SUMAN entre si antes
     # de comparar -- permite comparar bloques multi-anio (ej. 2022+2023 vs 2024+2025).
     actual = (
@@ -216,6 +242,9 @@ if cuadro.empty:
 graduados_base_seguro = cuadro["graduados_base"].replace(0, np.nan)
 documentados_base_seguro = cuadro["documentados_base"].replace(0, np.nan)
 
+####################################
+## % DE CAMBIO
+####################################
 cuadro["cambio_graduados_pct"] = (
     (cuadro["graduados_actual"] - cuadro["graduados_base"]) / graduados_base_seguro * 100
 ).round(1)
@@ -224,7 +253,9 @@ cuadro["cambio_documentados_pct"] = (
 ).round(1)
 cuadro = cuadro.dropna(subset=["cambio_graduados_pct", "cambio_documentados_pct"])
 
-
+###################################
+## CLASIFICACIÓN DE CUADRANTE
+###################################
 def clasificar(row):
     mercado_crece = row["cambio_graduados_pct"] >= 0
     udla_crece = row["cambio_documentados_pct"] >= 0

@@ -1,5 +1,6 @@
 """Funnel de captación UDLA (Graduados -> Leads -> Afluentes -> Documentados)
 cruzado con los colegios de origen, desde DwhStage..DocumentadosColegiosMINEDU."""
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -20,6 +21,10 @@ st.caption(
     "codigo_colegio = CodColegioBanner_Sales, y si no hay dato, CodColegioAMIED."
 )
 
+
+######################################
+## CARGA DE DATOS
+######################################
 resumen = cargar_documentados_resumen()
 detalle = cargar_documentados_detalle()
 detalle["codigo_colegio"] = detalle["CodColegioBanner_Sales"].fillna(detalle["CodColegioAMIED"])
@@ -71,21 +76,31 @@ if filtrado.empty:
 
 colegio_unico = filtrado["codigo_colegio"].nunique() == 1
 
+#################################
+## TABLA COBERTURA DE IDENTIFICACIÓN COLEGIO
+#################################
+
 # --- Cobertura: Leads/Afluentes/Documentados con colegio identificado vs. sin ninguno ---
 # Solo respeta el filtro de Periodo (no los de Colegio/Provincia/etc., ya que
 # los registros sin codigo_colegio no tienen esos atributos y no se pueden
-# ubicar en ningun grafico por colegio -- ver documentados_colegios_detalle.parquet).
+# ubicar en ningun grafico por colegio).
 resumen_periodo = _filtro_periodo(resumen)
 detalle_sin_colegio = _filtro_periodo(detalle[detalle["codigo_colegio"].isna()])
-grp_sin_colegio = detalle_sin_colegio.groupby(["PeriodoBanner_Sales", "CodBanner"], dropna=False)[["L", "A", "D"]].first()
+# La tabla nueva ya no tiene CodBanner. Para las filas sin colegio, cada fila
+# ya es unica por estudiante (no se repite) -- L y A se suman directo, sin
+# riesgo de duplicar. Documentados = conteo de IdBanner (cada fila de esta
+# tabla ya es un estudiante documentado, igual que en el resto de la pagina).
+leads_sin_colegio = detalle_sin_colegio["L"].sum()
+afluentes_sin_colegio = detalle_sin_colegio["A"].sum()
+documentados_sin_colegio = detalle_sin_colegio["IdBanner"].nunique()
 
 tabla_cobertura = pd.DataFrame({
     "Etapa": ["Leads", "Afluentes", "Documentados"],
     "Con colegio identificado": [
-        resumen_periodo["leads"].sum(), resumen_periodo["afluentes"].sum(), resumen_periodo["documentados_d"].sum(),
+        resumen_periodo["leads"].sum(), resumen_periodo["afluentes"].sum(), resumen_periodo["documentados"].sum(),
     ],
     "Sin colegio identificado (null)": [
-        grp_sin_colegio["L"].sum(), grp_sin_colegio["A"].sum(), grp_sin_colegio["D"].sum(),
+        leads_sin_colegio, afluentes_sin_colegio, documentados_sin_colegio,
     ],
 })
 tabla_cobertura["Total nacional"] = tabla_cobertura["Con colegio identificado"] + tabla_cobertura["Sin colegio identificado (null)"]
@@ -107,17 +122,22 @@ st.dataframe(
     width="stretch", hide_index=True,
 )
 
+###############################
+## GRÁFICO SERIE DE TIEMPO
+###############################
+
 # --- Funnel por periodo ---
-# "documentados" usa el campo D (funnel L-A-D, corregido para sumar entre
-# CodBanner -- ver etl/build_documentados_colegios.py). TotalDocumentadosPeriodo
-# es un campo aparte, no forma parte de esta secuencia L->A->D.
+# "documentados" = conteo de IdBanner por periodo+colegio (ver
+# etl/build_documentados_colegios.py) -- cada fila de la tabla origen ya es
+# un estudiante documentado. Sumar entre periodos/colegios es correcto porque
+# es un conteo, no un agregado repetido.
 por_periodo = (
     filtrado.groupby("PeriodoBanner_Sales")
     .agg(
         graduados=("graduados_total", "sum"),
         leads=("leads", "sum"),
         afluentes=("afluentes", "sum"),
-        documentados=("documentados_d", "sum"),
+        documentados=("documentados", "sum"),
     )
     .reset_index()
     .sort_values("PeriodoBanner_Sales")
@@ -128,7 +148,7 @@ por_periodo["tasa_documentados"] = (por_periodo["documentados"] / por_periodo["g
 
 st.subheader("Funnel en el tiempo: Graduados → Leads → Afluentes → Documentados")
 
-# Valor de pensión para el hover -- solo aplica si el filtro quedo en UN colegio
+# Valor de pensión -- solo aplica si el filtro quedo en UN colegio
 # y ese colegio tiene un valor de pension registrado; si no, no se muestra nada.
 pension_valor = None
 if colegio_unico:
@@ -168,8 +188,57 @@ fig_funnel.update_layout(
     hovermode="x unified",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     margin=dict(l=10, r=10, t=40, b=10),
+    height=400,
 )
-st.plotly_chart(fig_funnel, width="stretch")
+
+############################
+## LISTADO COLEGIOS 
+############################
+
+col_grafico, col_ranking = st.columns([2.2, 1.8])
+with col_grafico:
+    st.markdown("**Funnel**")
+    st.plotly_chart(fig_funnel, width="stretch")
+with col_ranking:
+    st.markdown("**Listado Colegios**")
+    # graduados_total es constante por (anio, colegio) -- se repite igual entre
+    # los periodos 10 y 20 del mismo año. Colapsar primero a (anio, colegio) con
+    # "first" evita duplicarlo al sumar sobre el rango de periodos filtrado.
+    filtrado_anio = filtrado.copy()
+    filtrado_anio["anio"] = filtrado_anio["PeriodoBanner_Sales"].str[:4]
+    por_anio_nombre = (
+        filtrado_anio.groupby(["anio", "nombre_institucion"])
+        .agg(graduados=("graduados_total", "first"), documentados=("documentados", "sum"))
+        .reset_index()
+    )
+    ranking_colegios = (
+        por_anio_nombre.groupby("nombre_institucion")
+        .agg(documentados=("documentados", "sum"), graduados=("graduados", "sum"))
+        .reset_index()
+    )
+    graduados_seguro = ranking_colegios["graduados"].mask(ranking_colegios["graduados"] == 0)
+    ranking_colegios["captacion_pct"] = (ranking_colegios["documentados"] / graduados_seguro * 100).round(1)
+    ranking_colegios = ranking_colegios.sort_values("documentados", ascending=False).rename(columns={
+        "nombre_institucion": "Colegio", "graduados": "Graduados",
+        "documentados": "Documentados", "captacion_pct": "% Captación",
+    })
+
+    def _fondo_variacion_ranking(val):
+        if pd.isna(val):
+            return ""
+        if val < 0:
+            return "background-color: rgba(176, 116, 90, 0.20)"  # rojo tenue (tono COLOR_ALERTA)
+        if val > 0:
+            return "background-color: rgba(76, 140, 107, 0.20)"  # verde tenue (tono COLOR_EXITO)
+        return ""
+
+    st.dataframe(
+        ranking_colegios[["Colegio", "Graduados", "Documentados", "% Captación"]].style
+        .map(_fondo_variacion_ranking, subset=["% Captación"])
+        .set_properties(subset=["Colegio"], **{"font-size": "0.8em"})
+        .format({"Graduados": "{:,.0f}", "Documentados": "{:,.0f}", "% Captación": "{:.1f}%"}, na_rep="—"),
+        width="stretch", height=400, hide_index=True,
+    )
 
 if colegio_unico:
     st.info(
@@ -179,7 +248,10 @@ if colegio_unico:
            else "Este colegio no tiene un valor de pensión registrado.")
     )
 
+
+##################################
 # --- Tabla anual (solo periodo 10): valores + % de variación interanual ---
+##################################
 st.subheader("Tabla anual (solo periodo 10)")
 st.caption(
     "Compara únicamente el primer ciclo de admisión de cada año (periodos que terminan en \"10\") "
@@ -199,7 +271,7 @@ else:
             graduados=("graduados_total", "sum"),
             leads=("leads", "sum"),
             afluentes=("afluentes", "sum"),
-            documentados=("documentados_d", "sum"),
+            documentados=("documentados", "sum"),
         )
         .reset_index()
         .sort_values("anio")

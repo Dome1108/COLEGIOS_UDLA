@@ -16,12 +16,15 @@ DATA_DIR = BASE_DIR / "data"
 EXT_DIR = DATA_DIR / "external"
 
 PATRON_ANIO = re.compile(r"(\d{4})-\d{4}")
-ULTIMO_ANIO_INCLUIDO = 2024  # excluye 2025-2026 Inicio a proposito
+ULTIMO_ANIO_INCLUIDO = 2024  # Se excluye 2025-2026 Inicio a proposito
 
 def _sin_tildes(texto):
     t = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"\s+", " ", t.strip())
 
+###########################
+## COLEGIOS CON BACHILLERATO
+###########################
 
 # normalizar_texto() (definida abajo) quita tildes del dato leido del Excel,
 # asi que esta lista debe compararse ya sin tildes tambien -- si no, las 4
@@ -38,6 +41,10 @@ NIVELES_BACHILLERATO = {
         "Educación Básica, Bachillerato,Alfabetización y Artesanal P.P.",
     ]
 }
+
+#################################
+## COLUMNAS POR POSICIÓN
+#################################
 
 # Columnas de identidad/ubicacion por posicion (0-indexed) -- estable en los
 # 16 archivos pese a que los nombres de columna varian levemente entre anios
@@ -60,7 +67,6 @@ COL_DOCENTES_F = 21
 COL_DOCENTES_M = 22
 COL_TOTAL_DOCENTES = 23
 COL_TOTAL_ESTUDIANTES = 29
-
 
 def normalizar_texto(texto):
     if not isinstance(texto, str) or not texto.strip():
@@ -87,6 +93,9 @@ def encontrar_fila_encabezado(path, max_filas=30):
             return i
     raise ValueError(f"No se encontro fila de encabezado con 'AMIE' en {path.name}")
 
+################################
+## PROMOVIDOS, NO PROMOVIMOS, ABANDONO
+################################
 
 def clasificar_columnas_grado(encabezados):
     """Clasifica columnas de desglose por grado por patron de texto (no
@@ -107,7 +116,9 @@ def clasificar_columnas_grado(encabezados):
             idx_abandono.append(i)
     return idx_promovido, idx_nopromovido, idx_abandono
 
-
+##################################
+## BUSQUEDA DE TERCERO DE BACHILLERATO
+##################################
 def clasificar_3er_bach(encabezados):
     """Encuentra las columnas de matricula BASE (sin desenlace) de 3er anio de
     Bachillerato, por sexo. El nombre de columna cambia de estilo entre anios:
@@ -133,7 +144,9 @@ def clasificar_3er_bach(encabezados):
             idx_hombres = i
     return idx_mujeres, idx_hombres
 
-
+##############################
+## ME QUEDO CON LA INFORMACIÓN A ANALIZAR
+##############################
 def cargar_periodo(path, anio_inicio, etiqueta_periodo):
     fila_enc = encontrar_fila_encabezado(path)
     encabezados_df = pd.read_excel(path, header=None, skiprows=fila_enc, nrows=1, engine="calamine")
@@ -193,7 +206,9 @@ def cargar_periodo(path, anio_inicio, etiqueta_periodo):
     salida["periodo"] = etiqueta_periodo
     return salida
 
-
+################################
+## FILTRAR UNIVERSO DE BACHILLERATO
+################################
 def filtrar_universo_bachillerato(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["nivel_educacion"].isin(NIVELES_BACHILLERATO)].reset_index(drop=True)
 
