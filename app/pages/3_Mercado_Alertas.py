@@ -295,6 +295,13 @@ abs_cambio_documentados = cuadro["cambio_documentados_pct"].abs()
 cuadro["distancia_linea_45"] = (
     (abs_cambio_documentados - abs_cambio_graduados).abs() / np.sqrt(2)
 ).round(1)
+menor_magnitud = pd.concat(
+    [abs_cambio_graduados, abs_cambio_documentados], axis=1
+).min(axis=1).replace(0, np.nan)
+mayor_magnitud = pd.concat(
+    [abs_cambio_graduados, abs_cambio_documentados], axis=1
+).max(axis=1)
+cuadro["relacion_magnitudes"] = (mayor_magnitud / menor_magnitud).round(2)
 
 
 def interpretar_ritmo(row):
@@ -302,24 +309,38 @@ def interpretar_ritmo(row):
     cambio_udla = row["cambio_documentados_pct"]
     magnitud_mercado = abs(cambio_mercado)
     magnitud_udla = abs(cambio_udla)
+    if magnitud_mercado == magnitud_udla:
+        if cambio_mercado >= 0 and cambio_udla >= 0:
+            lectura = "UDLA y mercado crecen al mismo ritmo"
+        elif cambio_mercado < 0 and cambio_udla < 0:
+            lectura = "UDLA y mercado caen al mismo ritmo"
+        else:
+            lectura = "Se mueven en sentidos opuestos con igual intensidad"
+        return f"{lectura} ({cambio_udla:+.1f}% vs mercado {cambio_mercado:+.1f}%)"
+
+    if min(magnitud_mercado, magnitud_udla) == 0:
+        factor_texto = "el otro indicador no cambia"
+    else:
+        factor = max(magnitud_mercado, magnitud_udla) / min(magnitud_mercado, magnitud_udla)
+        factor_texto = f"{factor:.1f}× la magnitud del otro"
 
     if cambio_mercado >= 0 and cambio_udla >= 0:
         if magnitud_udla > magnitud_mercado:
-            return "UDLA crece más rápido que el mercado"
-        if magnitud_mercado > magnitud_udla:
-            return "El mercado crece más rápido que UDLA"
-        return "UDLA y mercado crecen al mismo ritmo"
+            lectura = f"UDLA crece más rápido: {factor_texto}"
+        else:
+            lectura = f"El mercado crece más rápido: {factor_texto}"
 
-    if cambio_mercado < 0 and cambio_udla < 0:
+    elif cambio_mercado < 0 and cambio_udla < 0:
         if magnitud_udla > magnitud_mercado:
-            return "UDLA cae más rápido que el mercado"
-        if magnitud_mercado > magnitud_udla:
-            return "El mercado cae más rápido que UDLA"
-        return "UDLA y mercado caen al mismo ritmo"
+            lectura = f"UDLA cae más rápido: {factor_texto}"
+        else:
+            lectura = f"El mercado cae más rápido: {factor_texto}"
 
-    if cambio_mercado >= 0 and cambio_udla < 0:
-        return "El mercado crece mientras UDLA cae"
-    return "UDLA crece mientras el mercado cae"
+    else:
+        dominante = "UDLA" if magnitud_udla > magnitud_mercado else "el mercado"
+        lectura = f"Sentidos opuestos; {dominante} se mueve con mayor intensidad: {factor_texto}"
+
+    return f"{lectura} (UDLA {cambio_udla:+.1f}% vs mercado {cambio_mercado:+.1f}%)"
 
 
 cuadro["lectura_ritmo"] = cuadro.apply(interpretar_ritmo, axis=1)
@@ -544,14 +565,15 @@ st.plotly_chart(fig_cuadrante, width="stretch")
 st.subheader("Distancia a la línea de 45° por cuadrante")
 st.caption(
     "La distancia mide el desequilibrio entre la magnitud del cambio en Graduados y "
-    "Documentados. Un valor 0 indica cambios de igual magnitud. La tabla respeta la "
+    "Documentados. La relación de magnitudes indica cuántas veces es mayor el movimiento "
+    "dominante. Un valor 0 de distancia indica cambios de igual magnitud. La tabla respeta la "
     "opción Mostrar outliers del gráfico."
 )
 tabla_distancias = (
     cuadro_grafico[[
         "nombre_institucion", "anio_transicion", "cluster_mostrar", "cuadrante",
         "cambio_graduados_pct", "cambio_documentados_pct",
-        "distancia_linea_45", "lectura_ritmo",
+        "distancia_linea_45", "relacion_magnitudes", "lectura_ritmo",
     ]]
     .sort_values(["cuadrante", "distancia_linea_45"], ascending=[True, False])
     .rename(columns={
@@ -562,7 +584,8 @@ tabla_distancias = (
         "cambio_graduados_pct": "% cambio Graduados",
         "cambio_documentados_pct": "% cambio Documentados",
         "distancia_linea_45": "Distancia a línea 45°",
-        "lectura_ritmo": "Lectura del ritmo",
+        "relacion_magnitudes": "Relación de magnitudes",
+        "lectura_ritmo": "Interpretación del ritmo",
     })
 )
 st.dataframe(
@@ -570,7 +593,8 @@ st.dataframe(
         "% cambio Graduados": "{:+.1f}%",
         "% cambio Documentados": "{:+.1f}%",
         "Distancia a línea 45°": "{:.1f}",
-    }),
+        "Relación de magnitudes": "{:.2f}×",
+    }, na_rep="—"),
     width="stretch", height=400, hide_index=True,
 )
 

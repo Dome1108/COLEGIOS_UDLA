@@ -830,7 +830,7 @@ def calcular_cuadrantes_mercado(
 def aplicar_filtros(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     filtros_container = st.container(key="general_filters")
     filtros_container.markdown("**Filtros generales**")
-    fila_comparacion = filtros_container.columns(4, gap="small")
+    fila_comparacion = filtros_container.columns(5, gap="small")
     fila_filtros_1 = filtros_container.columns(4, gap="small")
     fila_filtros_2 = filtros_container.columns(4, gap="small")
     fila_filtros_3 = filtros_container.columns(5, gap="small")
@@ -847,6 +847,14 @@ def aplicar_filtros(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
             df_filtrado["AnioAnalisis"].astype(str).isin(anios_financieros_sel)
         ]
 
+    tipos_disponibles = sorted(
+        df_filtrado["Tipo"].dropna().astype(str).unique().tolist(), key=str
+    )
+    with fila_comparacion[1]:
+        tipos_sel = st.multiselect("Tipo", tipos_disponibles)
+    if tipos_sel:
+        df_filtrado = df_filtrado[df_filtrado["Tipo"].astype(str).isin(tipos_sel)]
+
     mercado_anios = pd.read_parquet(
         RUTA_CAPTACION, columns=["PeriodoBanner_Sales"]
     )["PeriodoBanner_Sales"].astype(str).str[:4]
@@ -854,7 +862,7 @@ def aplicar_filtros(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     anio_comparado_default = mercado_anios[-2] if len(mercado_anios) > 1 else mercado_anios[-1]
     anio_base_default = mercado_anios[-3] if len(mercado_anios) > 2 else mercado_anios[0]
 
-    with fila_comparacion[1]:
+    with fila_comparacion[2]:
         anios_base_sel = st.multiselect(
             "Año(s) base", mercado_anios, default=[anio_base_default]
         )
@@ -864,11 +872,11 @@ def aplicar_filtros(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         if anio_comparado_default in anios_comparables
         else anios_comparables[-1:]
     )
-    with fila_comparacion[2]:
+    with fila_comparacion[3]:
         anios_comparados_sel = st.multiselect(
             "Año(s) comparado(s)", anios_comparables, default=default_comparado
         )
-    with fila_comparacion[3]:
+    with fila_comparacion[4]:
         cuadrantes_sel = st.multiselect(
             "Cuadrante", CUADRANTES_MERCADO, default=CUADRANTES_MERCADO
         )
@@ -932,7 +940,7 @@ def aplicar_filtros(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     filtros = {
         "anio": anio_filtro_compatibilidad,
         "periodo": periodo_sel[0] if len(periodo_sel) == 1 else "Todos",
-        "tipo": "Todos",
+        "tipo": tipos_sel[0] if len(tipos_sel) == 1 else "Todos",
         "cluster": cluster_sel[0] if len(cluster_sel) == 1 else "Todos",
         "colegio": colegio_sel[0] if len(colegio_sel) == 1 else "Todos",
     }
