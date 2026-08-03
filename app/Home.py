@@ -25,5 +25,9 @@ captación sobre graduados y tabla de pensiones/colegiatura.
 **Mercado Alertas** — cuadrante que compara, por colegio, si su mercado de
 graduados creció o cayó vs. si la captación de UDLA ahí creció o cayó,
 con vista de tabla y alertas para los casos en caída en ambos frentes.
+
+**Indicadores Financieros del Hogar** — composición financiera, ingresos,
+empleo, deuda, calidad crediticia y esfuerzo económico en colegiaturas de los
+hogares de estudiantes, con filtros y comparativos por colegio y cluster.
 """
 )

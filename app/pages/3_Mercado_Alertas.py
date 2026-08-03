@@ -41,7 +41,18 @@ with cols_filtro[0]:
 with cols_filtro[1]:
     anios_base_sel = st.multiselect("Año(s) base", anios_disponibles, default=[anio_anterior_default])
 with cols_filtro[2]:
-    anios_actual_sel = st.multiselect("Año(s) comparado(s)", anios_disponibles, default=[anio_actual_default])
+    anios_comparables = [anio for anio in anios_disponibles if anio not in anios_base_sel]
+    default_comparado = (
+        [anio_actual_default]
+        if anio_actual_default in anios_comparables
+        else anios_comparables[-1:]
+    )
+    anios_actual_sel = st.multiselect(
+        "Año(s) comparado(s)",
+        anios_comparables,
+        default=default_comparado,
+        help="Los años seleccionados como base se excluyen de esta lista.",
+    )
 with cols_filtro[3]:
     provincias = sorted(resumen["provincia"].dropna().unique().tolist())
     provincia_sel = st.multiselect("Provincia", provincias)
@@ -66,10 +77,6 @@ CUADRANTES_TODOS = [
     "Mercado cae + UDLA cae",
 ]
 cuadrantes_sel = st.multiselect("Cuadrante (filtra tabla y alertas)", CUADRANTES_TODOS, default=CUADRANTES_TODOS)
-
-if set(anios_base_sel) & set(anios_actual_sel):
-    st.warning("Los años base y comparado no pueden superponerse — elige conjuntos distintos.")
-    st.stop()
 
 filtrado = resumen.copy()
 for col, sel in [
@@ -105,15 +112,26 @@ por_anio_colegio = (
 ################################
 ## TABLA ANUAL
 ################################
-# --- Tabla anual: valores + % de variación interanual (independiente del año base/comparado de abajo) ---
+# --- Tabla anual: responde a los años base/comparados seleccionados ---
 st.subheader("Tabla anual")
-st.caption(
-    "Usa TODOS los años disponibles para los colegios que queden en el filtro de Colegio/Provincia/Sostenimiento/"
-    "Cluster/Rango pensión (no depende de Año base/comparado). Cada colegio se cuenta una sola vez por año "
-    "(no se duplica entre los periodos 10 y 20). Ordenable por cualquier columna (clic en el encabezado)."
-)
+anios_tabla_sel = sorted(set(anios_base_sel) | set(anios_actual_sel))
+if anios_tabla_sel:
+    por_anio_colegio_tabla = por_anio_colegio[
+        por_anio_colegio["anio"].isin(anios_tabla_sel)
+    ]
+    st.caption(
+        "Muestra los años elegidos como base y comparados. La variación se calcula entre los años "
+        "seleccionados, en orden cronológico. Cada colegio se cuenta una sola vez por año y los "
+        "periodos 10 y 20 se agrupan dentro de su año."
+    )
+else:
+    por_anio_colegio_tabla = por_anio_colegio
+    st.caption(
+        "Como no hay años base ni comparados seleccionados, se muestran todos los años disponibles "
+        "para visualizar la trayectoria completa."
+    )
 por_anio_tabla = (
-    por_anio_colegio.groupby("anio")
+    por_anio_colegio_tabla.groupby("anio")
     .agg(
         colegios=("codigo_colegio", "nunique"),
         graduados=("graduados", "sum"),
@@ -270,11 +288,55 @@ def clasificar(row):
 
 cuadro["cuadrante"] = cuadro.apply(clasificar, axis=1)
 
+# Distancia perpendicular a la diagonal de 45° correspondiente al cuadrante.
+# En cuadrantes con signos iguales se usa y=x; con signos opuestos, y=-x.
+abs_cambio_graduados = cuadro["cambio_graduados_pct"].abs()
+abs_cambio_documentados = cuadro["cambio_documentados_pct"].abs()
+cuadro["distancia_linea_45"] = (
+    (abs_cambio_documentados - abs_cambio_graduados).abs() / np.sqrt(2)
+).round(1)
+
+
+def interpretar_ritmo(row):
+    cambio_mercado = row["cambio_graduados_pct"]
+    cambio_udla = row["cambio_documentados_pct"]
+    magnitud_mercado = abs(cambio_mercado)
+    magnitud_udla = abs(cambio_udla)
+
+    if cambio_mercado >= 0 and cambio_udla >= 0:
+        if magnitud_udla > magnitud_mercado:
+            return "UDLA crece más rápido que el mercado"
+        if magnitud_mercado > magnitud_udla:
+            return "El mercado crece más rápido que UDLA"
+        return "UDLA y mercado crecen al mismo ritmo"
+
+    if cambio_mercado < 0 and cambio_udla < 0:
+        if magnitud_udla > magnitud_mercado:
+            return "UDLA cae más rápido que el mercado"
+        if magnitud_mercado > magnitud_udla:
+            return "El mercado cae más rápido que UDLA"
+        return "UDLA y mercado caen al mismo ritmo"
+
+    if cambio_mercado >= 0 and cambio_udla < 0:
+        return "El mercado crece mientras UDLA cae"
+    return "UDLA crece mientras el mercado cae"
+
+
+cuadro["lectura_ritmo"] = cuadro.apply(interpretar_ritmo, axis=1)
+
 COLOR_CUADRANTE = {
     "Mercado crece + UDLA crece": COLOR_EXITO,
     "Mercado cae + UDLA crece": COLOR_PRIMARIO,
     "Mercado crece + UDLA cae": COLOR_SECUNDARIO,
     "Mercado cae + UDLA cae": COLOR_ALERTA,
+}
+
+COLOR_CLUSTER = {
+    "AAA": "#315A7D",
+    "AA": "#5D9BD5",
+    "A": "#73A580",
+    "B": "#D4A373",
+    "Sin cluster": "#AEB7C2",
 }
 
 # --- KPIs nacionales (sobre este mismo filtro) ---
@@ -313,14 +375,45 @@ else:
 
 # --- Vista 1: Cuadrante (scatter) ---
 st.subheader("Vista de cuadrante")
-doc_actual_max = cuadro["documentados_actual"].max() or 1
+mostrar_outliers = st.toggle(
+    "Mostrar outliers",
+    value=True,
+    help=(
+        "Al desactivarlo se ocultan del gráfico los puntos fuera de 1,5 veces el rango "
+        "intercuartílico (IQR) en cualquiera de los dos ejes. Las tablas, KPIs y alertas "
+        "mantienen todos los datos."
+    ),
+)
+
+cuadro_grafico = cuadro
+if not mostrar_outliers and not cuadro.empty:
+    mascara_sin_outliers = pd.Series(True, index=cuadro.index)
+    for columna_cambio in ["cambio_graduados_pct", "cambio_documentados_pct"]:
+        q1 = cuadro[columna_cambio].quantile(0.25)
+        q3 = cuadro[columna_cambio].quantile(0.75)
+        iqr = q3 - q1
+        limite_inferior = q1 - 1.5 * iqr
+        limite_superior = q3 + 1.5 * iqr
+        mascara_sin_outliers &= cuadro[columna_cambio].between(
+            limite_inferior, limite_superior, inclusive="both"
+        )
+    cuadro_grafico = cuadro[mascara_sin_outliers]
+    st.caption(
+        f"Se ocultaron {len(cuadro) - len(cuadro_grafico):,} de {len(cuadro):,} puntos "
+        "atípicos solamente en este gráfico."
+    )
+
+doc_actual_max = cuadro_grafico["documentados_actual"].max() if not cuadro_grafico.empty else 1
+doc_actual_max = doc_actual_max or 1
+cuadro_grafico = cuadro_grafico.copy()
+cuadro_grafico["cluster_mostrar"] = cuadro_grafico["cluster"].fillna("Sin cluster")
 fig_cuadrante = go.Figure()
 
 if modo_trayectoria:
-    for _, grupo in cuadro.groupby("codigo_colegio"):
+    for _, grupo in cuadro_grafico.groupby("codigo_colegio"):
         grupo = grupo.sort_values("anio_transicion")
         tamanos = 8 + (grupo["documentados_actual"] / doc_actual_max) * 34
-        colores_puntos = grupo["cuadrante"].map(COLOR_CUADRANTE)
+        colores_puntos = grupo["cluster_mostrar"].map(COLOR_CLUSTER).fillna("#AEB7C2")
         fig_cuadrante.add_trace(
             go.Scatter(
                 x=grupo["cambio_graduados_pct"], y=grupo["cambio_documentados_pct"],
@@ -328,39 +421,52 @@ if modo_trayectoria:
                 line=dict(width=1, color="#B8B4AC"),
                 marker=dict(size=tamanos, sizemode="diameter", color=colores_puntos, line=dict(width=1, color="white")),
                 customdata=grupo[[
-                    "nombre_institucion", "anio_transicion",
+                    "nombre_institucion", "anio_transicion", "cluster_mostrar", "cuadrante",
                     "documentados_base", "documentados_actual", "graduados_base", "graduados_actual",
                 ]],
                 hovertemplate=(
                     "%{customdata[0]} (%{customdata[1]})<br>"
-                    "Documentados: %{customdata[2]:,.0f} → %{customdata[3]:,.0f} (%{y:+.1f}%)<br>"
-                    "Graduados: %{customdata[4]:,.0f} → %{customdata[5]:,.0f} (%{x:+.1f}%)"
+                    "Cluster: %{customdata[2]}<br>Cuadrante: %{customdata[3]}<br>"
+                    "Documentados: %{customdata[4]:,.0f} → %{customdata[5]:,.0f} (%{y:+.1f}%)<br>"
+                    "Graduados: %{customdata[6]:,.0f} → %{customdata[7]:,.0f} (%{x:+.1f}%)"
                     "<extra></extra>"
                 ),
             )
         )
-    # Leyenda manual de colores de cuadrante (las trazas por colegio van con showlegend=False).
-    for cuadrante_nombre, color in COLOR_CUADRANTE.items():
+    # Leyenda manual de cluster (las trazas por colegio van con showlegend=False).
+    for cluster_nombre in COLOR_CLUSTER:
+        if cluster_nombre not in cuadro_grafico["cluster_mostrar"].values:
+            continue
         fig_cuadrante.add_trace(go.Scatter(
-            x=[None], y=[None], mode="markers", marker=dict(size=9, color=color), name=cuadrante_nombre,
+            x=[None], y=[None], mode="markers",
+            marker=dict(size=9, color=COLOR_CLUSTER[cluster_nombre]), name=f"Cluster {cluster_nombre}",
         ))
     titulo_x = "% cambio en Graduados (vs año anterior)"
     titulo_y = "% cambio en Documentados UDLA (vs año anterior)"
 else:
-    for cuadrante_nombre, color in COLOR_CUADRANTE.items():
-        sub = cuadro[cuadro["cuadrante"] == cuadrante_nombre]
+    for cluster_nombre in COLOR_CLUSTER:
+        sub = cuadro_grafico[cuadro_grafico["cluster_mostrar"] == cluster_nombre]
+        if sub.empty:
+            continue
         tamanos = 8 + (sub["documentados_actual"] / doc_actual_max) * 34
         fig_cuadrante.add_trace(
             go.Scatter(
                 x=sub["cambio_graduados_pct"], y=sub["cambio_documentados_pct"],
-                mode="markers", name=cuadrante_nombre,
-                marker=dict(size=tamanos, sizemode="diameter", color=color, line=dict(width=1, color="white")),
+                mode="markers", name=f"Cluster {cluster_nombre}",
+                marker=dict(
+                    size=tamanos, sizemode="diameter", color=COLOR_CLUSTER[cluster_nombre],
+                    line=dict(width=1, color="white"),
+                ),
                 text=sub["nombre_institucion"],
-                customdata=sub[["documentados_base", "documentados_actual", "graduados_base", "graduados_actual"]],
+                customdata=sub[[
+                    "cluster_mostrar", "cuadrante", "documentados_base", "documentados_actual",
+                    "graduados_base", "graduados_actual",
+                ]],
                 hovertemplate=(
                     "%{text}<br>"
-                    f"Documentados {etiqueta_base}→{etiqueta_actual}: " + "%{customdata[0]:,.0f} → %{customdata[1]:,.0f} (%{y:+.1f}%)<br>"
-                    f"Graduados {etiqueta_base}→{etiqueta_actual}: " + "%{customdata[2]:,.0f} → %{customdata[3]:,.0f} (%{x:+.1f}%)"
+                    "Cluster: %{customdata[0]}<br>Cuadrante: %{customdata[1]}<br>"
+                    f"Documentados {etiqueta_base}→{etiqueta_actual}: " + "%{customdata[2]:,.0f} → %{customdata[3]:,.0f} (%{y:+.1f}%)<br>"
+                    f"Graduados {etiqueta_base}→{etiqueta_actual}: " + "%{customdata[4]:,.0f} → %{customdata[5]:,.0f} (%{x:+.1f}%)"
                     "<extra></extra>"
                 ),
             )
@@ -370,6 +476,60 @@ else:
 
 fig_cuadrante.add_hline(y=0, line=dict(color=COLOR_SECUNDARIO, width=1, dash="dot"))
 fig_cuadrante.add_vline(x=0, line=dict(color=COLOR_SECUNDARIO, width=1, dash="dot"))
+
+# Diagonales de 45°: cambios de igual magnitud entre Graduados y Documentados.
+if not cuadro_grafico.empty:
+    x_min = cuadro_grafico["cambio_graduados_pct"].min()
+    x_max = cuadro_grafico["cambio_graduados_pct"].max()
+    y_min = cuadro_grafico["cambio_documentados_pct"].min()
+    y_max = cuadro_grafico["cambio_documentados_pct"].max()
+
+    # y = x (cuadrantes inferior izquierdo y superior derecho)
+    diagonal_positiva_min = max(x_min, y_min)
+    diagonal_positiva_max = min(x_max, y_max)
+    if diagonal_positiva_min < diagonal_positiva_max:
+        fig_cuadrante.add_shape(
+            type="line",
+            x0=diagonal_positiva_min, y0=diagonal_positiva_min,
+            x1=diagonal_positiva_max, y1=diagonal_positiva_max,
+            line=dict(color="#A9C4DD", width=1.5, dash="dash"),
+            layer="below",
+        )
+
+    # y = -x (cuadrantes superior izquierdo e inferior derecho)
+    diagonal_negativa_min = max(x_min, -y_max)
+    diagonal_negativa_max = min(x_max, -y_min)
+    if diagonal_negativa_min < diagonal_negativa_max:
+        fig_cuadrante.add_shape(
+            type="line",
+            x0=diagonal_negativa_min, y0=-diagonal_negativa_min,
+            x1=diagonal_negativa_max, y1=-diagonal_negativa_max,
+            line=dict(color="#A9C4DD", width=1.5, dash="dash"),
+            layer="below",
+        )
+
+    # Etiquetas internas: el color identifica el cluster y la posición, el cuadrante.
+    posicion_etiqueta_superior = 0.98
+    posicion_etiqueta_inferior = 0.02
+    etiquetas_cuadrantes = [
+        (x_max > 0 and y_max > 0, x_max / 2, posicion_etiqueta_superior, "Mercado crece · UDLA crece"),
+        (x_min < 0 and y_max > 0, x_min / 2, posicion_etiqueta_superior, "Mercado cae · UDLA crece"),
+        (x_max > 0 and y_min < 0, x_max / 2, posicion_etiqueta_inferior, "Mercado crece · UDLA cae"),
+        (x_min < 0 and y_min < 0, x_min / 2, posicion_etiqueta_inferior, "Mercado cae · UDLA cae"),
+    ]
+    for mostrar_etiqueta, x_etiqueta, y_etiqueta, texto_etiqueta in etiquetas_cuadrantes:
+        if not mostrar_etiqueta:
+            continue
+        fig_cuadrante.add_annotation(
+            x=x_etiqueta,
+            y=y_etiqueta,
+            yref="paper",
+            text=texto_etiqueta,
+            showarrow=False,
+            align="center",
+            font=dict(size=11, color="#60758A"),
+        )
+
 fig_cuadrante.update_layout(
     template="plotly_white",
     xaxis_title=titulo_x,
@@ -379,6 +539,40 @@ fig_cuadrante.update_layout(
     height=520,
 )
 st.plotly_chart(fig_cuadrante, width="stretch")
+
+# --- Distancia de cada punto a la diagonal de 45°, por cuadrante ---
+st.subheader("Distancia a la línea de 45° por cuadrante")
+st.caption(
+    "La distancia mide el desequilibrio entre la magnitud del cambio en Graduados y "
+    "Documentados. Un valor 0 indica cambios de igual magnitud. La tabla respeta la "
+    "opción Mostrar outliers del gráfico."
+)
+tabla_distancias = (
+    cuadro_grafico[[
+        "nombre_institucion", "anio_transicion", "cluster_mostrar", "cuadrante",
+        "cambio_graduados_pct", "cambio_documentados_pct",
+        "distancia_linea_45", "lectura_ritmo",
+    ]]
+    .sort_values(["cuadrante", "distancia_linea_45"], ascending=[True, False])
+    .rename(columns={
+        "nombre_institucion": "Colegio",
+        "anio_transicion": "Año/Transición",
+        "cluster_mostrar": "Cluster",
+        "cuadrante": "Cuadrante",
+        "cambio_graduados_pct": "% cambio Graduados",
+        "cambio_documentados_pct": "% cambio Documentados",
+        "distancia_linea_45": "Distancia a línea 45°",
+        "lectura_ritmo": "Lectura del ritmo",
+    })
+)
+st.dataframe(
+    tabla_distancias.style.format({
+        "% cambio Graduados": "{:+.1f}%",
+        "% cambio Documentados": "{:+.1f}%",
+        "Distancia a línea 45°": "{:.1f}",
+    }),
+    width="stretch", height=400, hide_index=True,
+)
 
 # --- Vista 2: Tabla ---
 st.subheader("Vista de tabla")
