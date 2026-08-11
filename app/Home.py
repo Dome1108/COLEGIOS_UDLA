@@ -1,33 +1,28 @@
-"""Página de bienvenida — resumen de qué contiene cada página del dashboard."""
+"""Punto de entrada del dashboard y configuración de la navegación visible."""
+
 import streamlit as st
 
-from utils.theme import inject_css
 
-st.set_page_config(page_title="Captación UDLA — Colegios", layout="wide")
-inject_css()
-
-st.title("Captación universitaria de bachilleres — UDLA")
-st.caption("Dashboard local (no publicado). Usa el menú de la izquierda para navegar.")
-
-st.markdown(
-    """
-### Páginas disponibles
-
-**Universo de Colegios** — universo nacional de instituciones con oferta de
-Bachillerato (MINEDUC/MINEDEC), con filtros de ubicación/sostenimiento/régimen
-y tendencias de matrícula, instituciones y tasas de promoción/no
-promoción/abandono.
-
-**Captación UDLA** — funnel Graduados → Leads → Afluentes → Documentados por
-colegio de origen (fuente: `DwhStage..DocumentadosColegiosMINEDU`), con % de
-captación sobre graduados y tabla de pensiones/colegiatura.
-
-**Mercado Alertas** — cuadrante que compara, por colegio, si su mercado de
-graduados creció o cayó vs. si la captación de UDLA ahí creció o cayó,
-con vista de tabla y alertas para los casos en caída en ambos frentes.
-
-**Indicadores Financieros del Hogar** — composición financiera, ingresos,
-empleo, deuda, calidad crediticia y esfuerzo económico en colegiaturas de los
-hogares de estudiantes, con filtros y comparativos por colegio y cluster.
-"""
+pagina = st.navigation(
+    [
+        st.Page(
+            "pages/0_Contexto_Macro.py",
+            title="Contexto macro",
+            default=True,
+        ),
+        st.Page(
+            "pages/1_Universo_Colegios.py",
+            title="Universo de Colegios",
+        ),
+        st.Page(
+            "pages/2_Captacion_UDLA.py",
+            title="Captación UDLA",
+        ),
+        st.Page(
+            "pages/3_Mercado_Alertas.py",
+            title="Mercado Alertas",
+        ),
+    ]
 )
+
+pagina.run()

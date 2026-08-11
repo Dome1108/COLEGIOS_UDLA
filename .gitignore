@@ -2,8 +2,12 @@
 __pycache__/
 *.pyc
 .venv/
+.venv_nueva/
+.claude/
 streamlit_out.log
 streamlit_err.log
+streamlit.stdout.log
+streamlit.stderr.log
 ~$*.xlsx
 ~$*.xls
 4.2.0
