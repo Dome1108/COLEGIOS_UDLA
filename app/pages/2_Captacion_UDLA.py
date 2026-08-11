@@ -12,6 +12,9 @@ st.set_page_config(page_title="Captación UDLA", layout="wide")
 inject_css()
 
 COLOR_TERCIARIO = "#5D9BD5"
+# Bucket con el que el ETL agrega los registros que no se pudieron atribuir a
+# ningun colegio (ver etl/build_documentados_colegios.py).
+CODIGO_SIN_COLEGIO = "ND"
 COLOR_ALERTA = "#B0745A"
 COLOR_EXITO = "#4C8C6B"
 
@@ -27,7 +30,13 @@ st.caption(
 ######################################
 resumen = cargar_documentados_resumen()
 detalle = cargar_documentados_detalle()
-detalle["codigo_colegio"] = detalle["CodColegioBanner_Sales"].fillna(detalle["CodColegioAMIED"])
+# Mismo criterio que etl/build_documentados_colegios.py: el centinela "ND"
+# ("SIN INFORMACION DE COLEGIO") cuenta como sin colegio, no como un codigo mas.
+detalle["codigo_colegio"] = (
+    detalle["CodColegioBanner_Sales"]
+    .mask(detalle["CodColegioBanner_Sales"] == CODIGO_SIN_COLEGIO)
+    .fillna(detalle["CodColegioAMIED"].mask(detalle["CodColegioAMIED"] == CODIGO_SIN_COLEGIO))
+)
 
 # --- Filtros (selección múltiple; vacío = sin filtrar / todas las opciones) ---
 cols_filtro = st.columns([2, 1.6, 1, 1, 1, 1, 1])
@@ -84,39 +93,38 @@ colegio_unico = filtrado["codigo_colegio"].nunique() == 1
 # Solo respeta el filtro de Periodo (no los de Colegio/Provincia/etc., ya que
 # los registros sin codigo_colegio no tienen esos atributos y no se pueden
 # ubicar en ningun grafico por colegio).
+# El resumen ya trae los registros sin colegio agregados en el bucket
+# CODIGO_SIN_COLEGIO (una fila por periodo), asi que la cobertura sale de ahi
+# y no hay que recalcularla desde el detalle.
 resumen_periodo = _filtro_periodo(resumen)
-detalle_sin_colegio = _filtro_periodo(detalle[detalle["codigo_colegio"].isna()])
-# La tabla nueva ya no tiene CodBanner. Para las filas sin colegio, cada fila
-# ya es unica por estudiante (no se repite) -- L y A se suman directo, sin
-# riesgo de duplicar. Documentados = conteo de IdBanner (cada fila de esta
-# tabla ya es un estudiante documentado, igual que en el resto de la pagina).
-leads_sin_colegio = detalle_sin_colegio["L"].sum()
-afluentes_sin_colegio = detalle_sin_colegio["A"].sum()
-documentados_sin_colegio = detalle_sin_colegio["IdBanner"].nunique()
+es_bucket = resumen_periodo["codigo_colegio"] == CODIGO_SIN_COLEGIO
+con_colegio = resumen_periodo[~es_bucket]
+sin_colegio = resumen_periodo[es_bucket]
 
+ETAPAS = [("Leads", "leads"), ("Afluentes", "afluentes"), ("Documentados", "documentados")]
 tabla_cobertura = pd.DataFrame({
-    "Etapa": ["Leads", "Afluentes", "Documentados"],
-    "Con colegio identificado": [
-        resumen_periodo["leads"].sum(), resumen_periodo["afluentes"].sum(), resumen_periodo["documentados"].sum(),
-    ],
-    "Sin colegio identificado (null)": [
-        leads_sin_colegio, afluentes_sin_colegio, documentados_sin_colegio,
-    ],
+    "Etapa": [etiqueta for etiqueta, _ in ETAPAS],
+    "Con colegio identificado": [con_colegio[col].sum() for _, col in ETAPAS],
+    "Sin colegio identificado": [sin_colegio[col].sum() for _, col in ETAPAS],
 })
-tabla_cobertura["Total nacional"] = tabla_cobertura["Con colegio identificado"] + tabla_cobertura["Sin colegio identificado (null)"]
+tabla_cobertura["Total nacional"] = (
+    tabla_cobertura["Con colegio identificado"] + tabla_cobertura["Sin colegio identificado"]
+)
 tabla_cobertura["% sin colegio"] = (
-    tabla_cobertura["Sin colegio identificado (null)"] / tabla_cobertura["Total nacional"] * 100
+    tabla_cobertura["Sin colegio identificado"] / tabla_cobertura["Total nacional"] * 100
 ).round(1)
 
 st.subheader("Cobertura de identificación de colegio")
 st.caption(
     "Refleja solo el filtro de Periodo (no Colegio/Provincia/etc., ya que los registros sin colegio "
-    "no tienen esos atributos). Un registro sin `CodColegioBanner_Sales` ni `CodColegioAMIED` no se puede "
-    "ubicar en ningún gráfico por colegio y queda fuera del resto de esta página."
+    "no tienen esos atributos). Sin colegio identificado = registros con el centinela `ND` "
+    "(«SIN INFORMACIÓN DE COLEGIO») o sin `CodColegioBanner_Sales` ni `CodColegioAMIED`. Entran en los "
+    "totales de esta página agrupados en un solo colegio, pero no se pueden desagregar por "
+    "provincia, sostenimiento ni ningún otro atributo del colegio."
 )
 st.dataframe(
     tabla_cobertura.style.format({
-        "Con colegio identificado": "{:,.0f}", "Sin colegio identificado (null)": "{:,.0f}",
+        "Con colegio identificado": "{:,.0f}", "Sin colegio identificado": "{:,.0f}",
         "Total nacional": "{:,.0f}", "% sin colegio": "{:.1f}%",
     }),
     width="stretch", hide_index=True,

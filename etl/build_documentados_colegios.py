@@ -5,9 +5,14 @@ orden de prioridad, CodColegioBanner_Sales primero, y si
 no hay dato ahi, se usa CodColegioAMIED.
 
 
-Leads (L) y Afluentes (A) si son agregados a nivel colegio (como Graduados):
-se repiten iguales en todas las filas de un mismo periodo+colegio, así que se
-toman con "first", nunca se suman a nivel fila de estudiante.
+Leads (L) y Afluentes (A) vienen agregados a nivel
+(periodo, codigo_colegio, CodBanner) -- no a nivel de colegio AMIE. Un mismo
+codigo AMIE puede estar registrado bajo varios CodBanner en Banner, y cada uno
+trae su propio total de L y A. Se toma un valor por CodBanner y recien ahi se
+suman al nivel del colegio; nunca se suman a nivel fila de estudiante.
+
+Graduados si es atributo del colegio AMIE (dato MINEDUC): se toma con "first"
+y NO se suma por CodBanner, o se duplicarian los graduados del colegio.
 """
 import os
 from pathlib import Path
@@ -31,10 +36,19 @@ TABLA = "DwhStage..DocumentadosColegiosMINEDU_Nuevo"
 ## CLASIFICACIÓN DE CAMPO
 ##############################
 
-# Agregados a nivel (PeriodoBanner_Sales, codigo_colegio) -- se usa "first"
-# para todos, nunca se suma nada a nivel de fila de estudiante.
+COL_CODBANNER = "HomologadoCodBannerColegio"
+
+# Centinelas que la tabla usa en lugar de NULL para "no se identifico el
+# colegio" (NombreInstitucionAMIED = "SIN INFORMACION DE COLEGIO").
+CODIGOS_SIN_COLEGIO = ["ND"]
+
+# Agregados a nivel (PeriodoBanner_Sales, codigo_colegio, CodBanner): se toma
+# un valor por CodBanner y luego se suman al nivel del colegio.
+CAMPOS_NIVEL_CODBANNER = ["L", "A"]
+
+# Atributos del colegio AMIE, constantes dentro de (PeriodoBanner_Sales,
+# codigo_colegio) -- se usa "first", nunca se suman.
 CAMPOS_COLEGIO_CONSTANTES = [
-    "L", "A",
     "EstudiantesFemeninoTercerAñoBACH",
     "EstudiantesMasculinoTercerAñoBACH",
     "GraduadosColegioAMIED",
@@ -68,22 +82,88 @@ def extraer_detalle(engine) -> pd.DataFrame:
 ## CODAMIE, SI ES NULO TOMA EL SIGUIENTE
 #############################
 def agregar_codigo_colegio(df: pd.DataFrame) -> pd.DataFrame:
+    """codigo_colegio = CodColegioBanner_Sales y si no hay dato, CodColegioAMIED.
+    Los centinelas de CODIGOS_SIN_COLEGIO se normalizan a nulo: si entraran como
+    un codigo mas, "SIN INFORMACION DE COLEGIO" seria el colegio con mas leads
+    de todos los periodos."""
     df = df.copy()
-    df["codigo_colegio"] = df["CodColegioBanner_Sales"].fillna(df["CodColegioAMIED"])
+    banner, amie = (
+        df[col].mask(df[col].isin(CODIGOS_SIN_COLEGIO))
+        for col in ("CodColegioBanner_Sales", "CodColegioAMIED")
+    )
+    df["codigo_colegio"] = banner.fillna(amie)
     return df
 
 ############################
 ## TABLA RESUMEN
 ############################
+def sumar_por_codbanner(df: pd.DataFrame, llaves: list) -> pd.DataFrame:
+    """L y A totalizados por CodBanner: un valor por grupo (llaves + CodBanner)
+    y despues la suma al nivel de `llaves`. Devuelve un DataFrame indexado por
+    `llaves` con las columnas L y A.
+
+    La tabla pone el total en una sola fila del grupo y 0 en las demas, por eso
+    se toma el maximo. Solo hay conflicto real si dos filas del mismo grupo
+    traen valores distintos de cero."""
+    grupos = llaves + [COL_CODBANNER]
+
+    no_cero = df[grupos + CAMPOS_NIVEL_CODBANNER].copy()
+    no_cero[CAMPOS_NIVEL_CODBANNER] = no_cero[CAMPOS_NIVEL_CODBANNER].where(
+        no_cero[CAMPOS_NIVEL_CODBANNER] > 0
+    )
+    ambiguos = (
+        no_cero.groupby(grupos, dropna=False)[CAMPOS_NIVEL_CODBANNER]
+        .nunique()
+        .gt(1)
+        .any(axis=1)
+        .sum()
+    )
+    if ambiguos:
+        print(
+            f"ADVERTENCIA: {ambiguos:,} grupos (periodo, colegio, CodBanner) traen "
+            "mas de un valor distinto de cero en L o A; se toma el maximo."
+        )
+
+    return (
+        df.groupby(grupos, dropna=False)[CAMPOS_NIVEL_CODBANNER]
+        .max()
+        .groupby(level=llaves)
+        .sum()
+    )
+
+
+def construir_bucket_sin_colegio(df: pd.DataFrame, periodos) -> pd.DataFrame:
+    """Una fila por periodo con los registros que no se pudieron atribuir a
+    ningun colegio (centinela "ND" o sin ningun codigo), para que los totales
+    del dashboard cuadren con el total de la tabla origen.
+
+    Aqui L y A NO son totales repetidos: estas filas no tienen CodBanner y cada
+    una trae su propio valor, asi que se suman directo. Se limita a `periodos`
+    -- los que si tienen algun colegio identificado -- porque los demas son
+    100% sin colegio y solo agregarian periodos vacios al dashboard."""
+    sin_colegio = df[df["codigo_colegio"].isna() & df["PeriodoBanner_Sales"].isin(periodos)]
+
+    bucket = (
+        sin_colegio.groupby("PeriodoBanner_Sales")
+        .agg(leads=("L", "sum"), afluentes=("A", "sum"), documentados=("IdBanner", "nunique"))
+        .reset_index()
+    )
+    bucket["codigo_colegio"] = CODIGOS_SIN_COLEGIO[0]
+    bucket["nombre_institucion"] = "SIN INFORMACION DE COLEGIO"
+    return bucket
+
+
 def construir_resumen(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.dropna(subset=["codigo_colegio"])
+    identificados = df.dropna(subset=["codigo_colegio"])
+    llaves = ["PeriodoBanner_Sales", "codigo_colegio"]
 
     resumen = (
-        df.groupby(["PeriodoBanner_Sales", "codigo_colegio"], dropna=False)
+        identificados.groupby(llaves, dropna=False)
         .agg({
             **{col: "first" for col in CAMPOS_COLEGIO_CONSTANTES + CAMPOS_METADATA_COLEGIO},
             "IdBanner": "nunique",
         })
+        .join(sumar_por_codbanner(identificados, llaves))
         .reset_index()
     )
     ## Renombro columnas--------------------------------------------
@@ -105,7 +185,9 @@ def construir_resumen(df: pd.DataFrame) -> pd.DataFrame:
         "RangoPension": "rango_pension",
         "AñoGraduacionAMIED": "anio_graduacion_mineduc",
     })
-    return resumen
+
+    bucket = construir_bucket_sin_colegio(df, resumen["PeriodoBanner_Sales"].unique())
+    return pd.concat([resumen, bucket], ignore_index=True)
 
 
 def guardar_parquet(df: pd.DataFrame, path: Path) -> None:

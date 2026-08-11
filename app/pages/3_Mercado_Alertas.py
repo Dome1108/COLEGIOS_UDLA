@@ -14,10 +14,11 @@ inject_css()
 
 COLOR_EXITO = "#4C8C6B"
 COLOR_ALERTA = "#B0745A"
+ANIO_BASE = "2022"
 
 st.title("Mercado y Alertas — ¿Creció el colegio? ¿Le fue bien a UDLA ahí?")
 st.caption(
-    "Compara el último año académico completo contra el anterior, por colegio. "
+    f"Compara todos los años disponibles contra el año base {ANIO_BASE}, por colegio. "
     "Un 'año' agrupa los 2 periodos de admisión (ej. 2025 = 202510 + 202520)."
 )
 
@@ -26,10 +27,9 @@ resumen = resumen.copy()
 resumen["anio"] = resumen["PeriodoBanner_Sales"].str[:4]
 
 anios_disponibles = sorted(resumen["anio"].unique())
-# El ultimo anio suele estar incompleto (admision en curso) -- se excluye del
-# par de comparacion por defecto, pero se puede elegir manualmente.
-anio_actual_default = anios_disponibles[-2] if len(anios_disponibles) > 1 else anios_disponibles[-1]
-anio_anterior_default = anios_disponibles[-3] if len(anios_disponibles) > 2 else anios_disponibles[0]
+if ANIO_BASE not in anios_disponibles:
+    st.error(f"No se encontró el año base {ANIO_BASE} en los datos.")
+    st.stop()
 
 ##########################
 ## TRAIGO LOS CAMPOS
@@ -39,19 +39,18 @@ with cols_filtro[0]:
     colegios_nombres = sorted(resumen["nombre_institucion"].dropna().unique().tolist())
     colegio_sel = st.multiselect("Colegio", colegios_nombres)
 with cols_filtro[1]:
-    anios_base_sel = st.multiselect("Año(s) base", anios_disponibles, default=[anio_anterior_default])
-with cols_filtro[2]:
-    anios_comparables = [anio for anio in anios_disponibles if anio not in anios_base_sel]
-    default_comparado = (
-        [anio_actual_default]
-        if anio_actual_default in anios_comparables
-        else anios_comparables[-1:]
+    anio_base_sel = st.selectbox(
+        "Año base",
+        anios_disponibles,
+        index=anios_disponibles.index(ANIO_BASE),
     )
+with cols_filtro[2]:
+    anios_comparables = [anio for anio in anios_disponibles if anio != anio_base_sel]
     anios_actual_sel = st.multiselect(
         "Año(s) comparado(s)",
         anios_comparables,
-        default=default_comparado,
-        help="Los años seleccionados como base se excluyen de esta lista.",
+        default=anios_comparables,
+        help="Por defecto se muestran todos los años distintos del año base.",
     )
 with cols_filtro[3]:
     provincias = sorted(resumen["provincia"].dropna().unique().tolist())
@@ -112,24 +111,16 @@ por_anio_colegio = (
 ################################
 ## TABLA ANUAL
 ################################
-# --- Tabla anual: responde a los años base/comparados seleccionados ---
+# --- Tabla anual: todos los años comparados contra el año base ---
 st.subheader("Tabla anual")
-anios_tabla_sel = sorted(set(anios_base_sel) | set(anios_actual_sel))
-if anios_tabla_sel:
-    por_anio_colegio_tabla = por_anio_colegio[
-        por_anio_colegio["anio"].isin(anios_tabla_sel)
-    ]
-    st.caption(
-        "Muestra los años elegidos como base y comparados. La variación se calcula entre los años "
-        "seleccionados, en orden cronológico. Cada colegio se cuenta una sola vez por año y los "
-        "periodos 10 y 20 se agrupan dentro de su año."
-    )
-else:
-    por_anio_colegio_tabla = por_anio_colegio
-    st.caption(
-        "Como no hay años base ni comparados seleccionados, se muestran todos los años disponibles "
-        "para visualizar la trayectoria completa."
-    )
+anios_tabla_sel = [anio_base_sel] + anios_actual_sel
+por_anio_colegio_tabla = por_anio_colegio[
+    por_anio_colegio["anio"].isin(anios_tabla_sel)
+]
+st.caption(
+    f"Muestra el año base y los años comparados seleccionados. Todas las variaciones se calculan contra {anio_base_sel}. "
+    "Cada colegio se cuenta una sola vez por año y los periodos 10 y 20 se agrupan dentro de su año."
+)
 por_anio_tabla = (
     por_anio_colegio_tabla.groupby("anio")
     .agg(
@@ -140,8 +131,17 @@ por_anio_tabla = (
     .reset_index()
     .sort_values("anio")
 )
-por_anio_tabla["var_graduados_pct"] = por_anio_tabla["graduados"].pct_change().mul(100).round(1)
-por_anio_tabla["var_documentados_pct"] = por_anio_tabla["documentados"].pct_change().mul(100).round(1)
+fila_base_tabla_sel = por_anio_tabla[por_anio_tabla["anio"] == anio_base_sel]
+if fila_base_tabla_sel.empty:
+    st.warning(f"Los filtros seleccionados no tienen datos para el año base {anio_base_sel}.")
+    st.stop()
+fila_base_tabla = fila_base_tabla_sel.iloc[0]
+por_anio_tabla["var_graduados_pct"] = (
+    (por_anio_tabla["graduados"] - fila_base_tabla["graduados"]) / fila_base_tabla["graduados"] * 100
+).round(1)
+por_anio_tabla["var_documentados_pct"] = (
+    (por_anio_tabla["documentados"] - fila_base_tabla["documentados"]) / fila_base_tabla["documentados"] * 100
+).round(1)
 graduados_seguro_tabla = por_anio_tabla["graduados"].mask(por_anio_tabla["graduados"] == 0)
 por_anio_tabla["captacion_pct"] = (por_anio_tabla["documentados"] / graduados_seguro_tabla * 100).round(1)
 tabla_anual = por_anio_tabla.sort_values("anio", ascending=False).rename(columns={
@@ -173,25 +173,18 @@ st.dataframe(
 ###########################
 ## MODO TRAYECTORIA
 ##########################
-modo_trayectoria = not anios_base_sel and not anios_actual_sel
-if not modo_trayectoria and (not anios_base_sel or not anios_actual_sel):
-    st.warning("Elige al menos un año base y un año comparado (o deja ambos vacíos para ver la trayectoria completa).")
-    st.stop()
-
-if modo_trayectoria:
-    # Sin año base/comparado elegido: se arma UNA fila por colegio y por CADA
-    # transicion consecutiva (2022->2023, 2023->2024, ...), para poder trazar
-    # el "camino" completo del colegio por el cuadrante en el tiempo.
-    filas_transicion = []
-    for anio_prev, anio_curr in zip(anios_disponibles[:-1], anios_disponibles[1:]):
-        base_y = por_anio_colegio[por_anio_colegio["anio"] == anio_prev].set_index("codigo_colegio")
+modo_trayectoria = True
+# Una fila por colegio y año; todos los años se comparan directamente con 2022.
+filas_transicion = []
+base_y = por_anio_colegio[por_anio_colegio["anio"] == anio_base_sel].set_index("codigo_colegio")
+for anio_curr in anios_actual_sel:
         actual_y = por_anio_colegio[por_anio_colegio["anio"] == anio_curr].set_index("codigo_colegio")
         comunes_y = base_y.index.intersection(actual_y.index)
         if len(comunes_y) == 0:
             continue
         filas_transicion.append(pd.DataFrame({
             "codigo_colegio": comunes_y,
-            "anio_transicion": f"{anio_prev}→{anio_curr}",
+            "anio_transicion": f"{anio_base_sel}→{anio_curr}",
             "nombre_institucion": actual_y.loc[comunes_y, "nombre_institucion"],
             "provincia": actual_y.loc[comunes_y, "provincia"],
             "canton": actual_y.loc[comunes_y, "canton"],
@@ -202,59 +195,13 @@ if modo_trayectoria:
             "documentados_base": base_y.loc[comunes_y, "documentados"],
             "documentados_actual": actual_y.loc[comunes_y, "documentados"],
         }))
-    cuadro = pd.concat(filas_transicion, ignore_index=True) if filas_transicion else pd.DataFrame(columns=[
-        "codigo_colegio", "anio_transicion", "nombre_institucion", "provincia", "canton", "sostenimiento",
-        "cluster", "graduados_base", "graduados_actual", "documentados_base", "documentados_actual",
-    ])
-else:
-    etiqueta_base = "+".join(anios_base_sel)
-    etiqueta_actual = "+".join(anios_actual_sel)
-
-########################
-## MODO COMPARACIÓN
-########################
-    # Si se eligen varios años en un grupo (base o actual), se SUMAN entre si antes
-    # de comparar -- permite comparar bloques multi-anio (ej. 2022+2023 vs 2024+2025).
-    actual = (
-        por_anio_colegio[por_anio_colegio["anio"].isin(anios_actual_sel)]
-        .groupby("codigo_colegio")
-        .agg(
-            nombre_institucion=("nombre_institucion", "first"),
-            provincia=("provincia", "first"),
-            canton=("canton", "first"),
-            sostenimiento=("sostenimiento", "first"),
-            cluster=("cluster", "first"),
-            graduados=("graduados", "sum"),
-            documentados=("documentados", "sum"),
-        )
-    )
-    base = (
-        por_anio_colegio[por_anio_colegio["anio"].isin(anios_base_sel)]
-        .groupby("codigo_colegio")
-        .agg(graduados=("graduados", "sum"), documentados=("documentados", "sum"))
-    )
-    comunes = base.index.intersection(actual.index)
-
-    if len(comunes) == 0:
-        st.warning("No hay colegios presentes en ambos grupos de años con estos filtros.")
-        st.stop()
-
-    cuadro = pd.DataFrame({
-        "codigo_colegio": comunes,
-        "anio_transicion": etiqueta_actual,
-        "nombre_institucion": actual.loc[comunes, "nombre_institucion"],
-        "provincia": actual.loc[comunes, "provincia"],
-        "canton": actual.loc[comunes, "canton"],
-        "sostenimiento": actual.loc[comunes, "sostenimiento"],
-        "cluster": actual.loc[comunes, "cluster"],
-        "graduados_base": base.loc[comunes, "graduados"],
-        "graduados_actual": actual.loc[comunes, "graduados"],
-        "documentados_base": base.loc[comunes, "documentados"],
-        "documentados_actual": actual.loc[comunes, "documentados"],
-    }).reset_index(drop=True)
+cuadro = pd.concat(filas_transicion, ignore_index=True) if filas_transicion else pd.DataFrame(columns=[
+    "codigo_colegio", "anio_transicion", "nombre_institucion", "provincia", "canton", "sostenimiento",
+    "cluster", "graduados_base", "graduados_actual", "documentados_base", "documentados_actual",
+])
 
 if cuadro.empty:
-    st.warning("No hay colegios comunes entre años consecutivos con estos filtros.")
+    st.warning(f"No hay colegios comunes entre {anio_base_sel} y los años comparados con estos filtros.")
     st.stop()
 
 graduados_base_seguro = cuadro["graduados_base"].replace(0, np.nan)
@@ -362,11 +309,11 @@ COLOR_CLUSTER = {
 
 # --- KPIs nacionales (sobre este mismo filtro) ---
 if modo_trayectoria:
-    st.subheader("Mercado: trayectoria año a año")
+    st.subheader(f"Mercado: años seleccionados contra {anio_base_sel}")
     n_colegios_trayectoria = cuadro["codigo_colegio"].nunique()
     st.caption(
-        f"{n_colegios_trayectoria:,} colegios · {cuadro['anio_transicion'].nunique()} transiciones año-a-año, "
-        "con estos filtros. Sin Año base/comparado elegidos, se muestra el camino completo de cada colegio."
+        f"{n_colegios_trayectoria:,} colegios · {cuadro['anio_transicion'].nunique()} comparaciones contra {anio_base_sel}, "
+        "con estos filtros. Cada punto representa un año comparado directamente con el año base."
     )
     if n_colegios_trayectoria > 15:
         st.warning(
@@ -438,8 +385,7 @@ if modo_trayectoria:
         fig_cuadrante.add_trace(
             go.Scatter(
                 x=grupo["cambio_graduados_pct"], y=grupo["cambio_documentados_pct"],
-                mode="lines+markers", showlegend=False,
-                line=dict(width=1, color="#B8B4AC"),
+                mode="markers", showlegend=False,
                 marker=dict(size=tamanos, sizemode="diameter", color=colores_puntos, line=dict(width=1, color="white")),
                 customdata=grupo[[
                     "nombre_institucion", "anio_transicion", "cluster_mostrar", "cuadrante",
@@ -462,8 +408,9 @@ if modo_trayectoria:
             x=[None], y=[None], mode="markers",
             marker=dict(size=9, color=COLOR_CLUSTER[cluster_nombre]), name=f"Cluster {cluster_nombre}",
         ))
-    titulo_x = "% cambio en Graduados (vs año anterior)"
-    titulo_y = "% cambio en Documentados UDLA (vs año anterior)"
+    etiqueta_comparacion = f"{anio_base_sel} vs {', '.join(anios_actual_sel)}"
+    titulo_x = f"% cambio en Graduados ({etiqueta_comparacion})"
+    titulo_y = f"% cambio en Documentados UDLA ({etiqueta_comparacion})"
 else:
     for cluster_nombre in COLOR_CLUSTER:
         sub = cuadro_grafico[cuadro_grafico["cluster_mostrar"] == cluster_nombre]
