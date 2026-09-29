@@ -13,6 +13,18 @@ suman al nivel del colegio; nunca se suman a nivel fila de estudiante.
 
 Graduados si es atributo del colegio AMIE (dato MINEDUC): se toma con "first"
 y NO se suma por CodBanner, o se duplicarian los graduados del colegio.
+
+Consultor es un atributo de (PeriodoBanner_Sales, CodBanner), no del colegio:
+un mismo codigo_colegio puede tener consultores distintos en el mismo periodo
+si tiene varios CodBanner. Por eso el resumen queda a nivel (periodo,
+codigo_colegio, CodBanner/cod_banner_colegio) -- HomologadoCodBannerColegio es
+el identificador real de cada "cuenta"; un colegio (codigo_colegio/AMIE) puede
+aparecer en mas de una fila por periodo si tiene varias cuentas Banner.
+Consultor se agrega con "first" dentro de ese grano (es constante ahi, no hace
+falta sumarlo ni desambiguarlo). Cualquier consumidor que sume graduados_total
+directamente sobre el resumen debe primero colapsar a (periodo, codigo_colegio)
+con "first", o lo duplicara por cada cuenta Banner. Los datos de Consultor solo
+existen desde el periodo 202420 en adelante; periodos anteriores quedan nulos.
 """
 import os
 from pathlib import Path
@@ -37,6 +49,12 @@ TABLA = "DwhStage..DocumentadosColegiosMINEDU_Nuevo"
 ##############################
 
 COL_CODBANNER = "HomologadoCodBannerColegio"
+
+# Un consultor por (PeriodoBanner_Sales, HomologadoCodBannerColegio) -- mismo
+# nivel que L y A. Se agrega al grano del resumen (no con "first" como los
+# atributos de colegio) porque dos CodBanner del mismo colegio en el mismo
+# periodo pueden traer consultores distintos.
+COL_CONSULTOR = "Consultor"
 
 # Centinelas que la tabla usa en lugar de NULL para "no se identifico el
 # colegio" (NombreInstitucionAMIED = "SIN INFORMACION DE COLEGIO").
@@ -98,14 +116,15 @@ def agregar_codigo_colegio(df: pd.DataFrame) -> pd.DataFrame:
 ## TABLA RESUMEN
 ############################
 def sumar_por_codbanner(df: pd.DataFrame, llaves: list) -> pd.DataFrame:
-    """L y A totalizados por CodBanner: un valor por grupo (llaves + CodBanner)
-    y despues la suma al nivel de `llaves`. Devuelve un DataFrame indexado por
-    `llaves` con las columnas L y A.
+    """L y A totalizados por CodBanner: un valor por grupo (llaves + CodBanner,
+    sin duplicar CodBanner si ya viene incluido en `llaves`) y despues la suma
+    al nivel de `llaves`. Devuelve un DataFrame indexado por `llaves` con las
+    columnas L y A.
 
     La tabla pone el total en una sola fila del grupo y 0 en las demas, por eso
     se toma el maximo. Solo hay conflicto real si dos filas del mismo grupo
     traen valores distintos de cero."""
-    grupos = llaves + [COL_CODBANNER]
+    grupos = llaves if COL_CODBANNER in llaves else llaves + [COL_CODBANNER]
 
     no_cero = df[grupos + CAMPOS_NIVEL_CODBANNER].copy()
     no_cero[CAMPOS_NIVEL_CODBANNER] = no_cero[CAMPOS_NIVEL_CODBANNER].where(
@@ -124,12 +143,10 @@ def sumar_por_codbanner(df: pd.DataFrame, llaves: list) -> pd.DataFrame:
             "mas de un valor distinto de cero en L o A; se toma el maximo."
         )
 
-    return (
-        df.groupby(grupos, dropna=False)[CAMPOS_NIVEL_CODBANNER]
-        .max()
-        .groupby(level=llaves)
-        .sum()
-    )
+    totales = df.groupby(grupos, dropna=False)[CAMPOS_NIVEL_CODBANNER].max()
+    if grupos == llaves:
+        return totales
+    return totales.groupby(level=llaves).sum()
 
 
 def construir_bucket_sin_colegio(df: pd.DataFrame, periodos) -> pd.DataFrame:
@@ -154,13 +171,20 @@ def construir_bucket_sin_colegio(df: pd.DataFrame, periodos) -> pd.DataFrame:
 
 
 def construir_resumen(df: pd.DataFrame) -> pd.DataFrame:
+    """Grano (PeriodoBanner_Sales, codigo_colegio, HomologadoCodBannerColegio):
+    HomologadoCodBannerColegio (cod_banner_colegio) es la cuenta Banner real, y
+    es el identificador correcto para analisis por consultor -- un mismo
+    codigo_colegio (AMIE) puede tener varias cuentas Banner con consultores
+    distintos en el mismo periodo, y agrupar solo por codigo_colegio (o peor,
+    por nombre_institucion) las mezclaria. Consultor se toma con "first" porque
+    es constante dentro de (periodo, CodBanner) -- ver docstring del modulo."""
     identificados = df.dropna(subset=["codigo_colegio"])
-    llaves = ["PeriodoBanner_Sales", "codigo_colegio"]
+    llaves = ["PeriodoBanner_Sales", "codigo_colegio", COL_CODBANNER]
 
     resumen = (
         identificados.groupby(llaves, dropna=False)
         .agg({
-            **{col: "first" for col in CAMPOS_COLEGIO_CONSTANTES + CAMPOS_METADATA_COLEGIO},
+            **{col: "first" for col in CAMPOS_COLEGIO_CONSTANTES + CAMPOS_METADATA_COLEGIO + [COL_CONSULTOR]},
             "IdBanner": "nunique",
         })
         .join(sumar_por_codbanner(identificados, llaves))
@@ -184,6 +208,8 @@ def construir_resumen(df: pd.DataFrame) -> pd.DataFrame:
         "BACHILLERATO PENSIÓN": "pension",
         "RangoPension": "rango_pension",
         "AñoGraduacionAMIED": "anio_graduacion_mineduc",
+        COL_CODBANNER: "cod_banner_colegio",
+        "Consultor": "consultor",
     })
 
     bucket = construir_bucket_sin_colegio(df, resumen["PeriodoBanner_Sales"].unique())

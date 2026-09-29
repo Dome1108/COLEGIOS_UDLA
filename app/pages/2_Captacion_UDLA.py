@@ -39,7 +39,7 @@ detalle["codigo_colegio"] = (
 )
 
 # --- Filtros (selección múltiple; vacío = sin filtrar / todas las opciones) ---
-cols_filtro = st.columns([2, 1.6, 1, 1, 1, 1, 1])
+cols_filtro = st.columns([2, 1.6, 1, 1, 1, 1, 1, 1])
 with cols_filtro[0]:
     colegios_nombres = sorted(resumen["nombre_institucion"].dropna().unique().tolist())
     colegio_sel = st.multiselect("Colegio", colegios_nombres)
@@ -62,6 +62,9 @@ with cols_filtro[5]:
 with cols_filtro[6]:
     rangos_pension = sorted(resumen["rango_pension"].dropna().unique().tolist())
     rango_pension_sel = st.multiselect("Rango pensión", rangos_pension)
+with cols_filtro[7]:
+    consultores = sorted(resumen["consultor"].dropna().unique().tolist())
+    consultor_sel = st.multiselect("Consultor", consultores)
 
 
 def _filtro_periodo(df):
@@ -74,7 +77,7 @@ for col, sel in [
     ("nombre_institucion", colegio_sel),
     ("provincia", provincia_sel), ("canton", canton_sel),
     ("sostenimiento", sostenimiento_sel), ("cluster", cluster_sel),
-    ("rango_pension", rango_pension_sel),
+    ("rango_pension", rango_pension_sel), ("consultor", consultor_sel),
 ]:
     if sel:
         filtrado = filtrado[filtrado[col].isin(sel)]
@@ -139,10 +142,22 @@ st.dataframe(
 # etl/build_documentados_colegios.py) -- cada fila de la tabla origen ya es
 # un estudiante documentado. Sumar entre periodos/colegios es correcto porque
 # es un conteo, no un agregado repetido.
+# graduados_total es constante por (periodo, colegio) y se repite en cada fila
+# de consultor de ese colegio (el resumen queda a nivel periodo x colegio x
+# consultor -- ver etl/build_documentados_colegios.py). Se colapsa primero a
+# (periodo, colegio) con "first" para no duplicarlo al sumar por periodo.
 por_periodo = (
-    filtrado.groupby("PeriodoBanner_Sales")
+    filtrado.groupby(["PeriodoBanner_Sales", "codigo_colegio"])
     .agg(
-        graduados=("graduados_total", "sum"),
+        graduados=("graduados_total", "first"),
+        leads=("leads", "sum"),
+        afluentes=("afluentes", "sum"),
+        documentados=("documentados", "sum"),
+    )
+    .reset_index()
+    .groupby("PeriodoBanner_Sales")
+    .agg(
+        graduados=("graduados", "sum"),
         leads=("leads", "sum"),
         afluentes=("afluentes", "sum"),
         documentados=("documentados", "sum"),
@@ -276,6 +291,337 @@ if colegio_unico:
 
 
 ##################################
+# --- Evolución histórica de consultores ---
+##################################
+st.subheader("Evolución de consultores en el tiempo")
+st.caption(
+    "Los datos de consultor solo existen desde el periodo 202420 en adelante; los periodos "
+    "anteriores no tienen consultor asignado."
+)
+
+##################################
+# --- Sankey: transición de consultores entre periodo origen y periodo destino ---
+##################################
+st.markdown("**Transición de consultores**")
+st.caption(
+    "Compara el consultor de cada colegio entre un periodo origen y un periodo destino, con los "
+    "filtros activos arriba. Solo incluye colegios presentes en ambos periodos. El ancho de cada "
+    "flujo es la cantidad de documentados en el periodo destino; el número de colegios y los "
+    "documentados de origen aparecen como dato adicional en el hover. Consultor vacío o nulo se "
+    "etiqueta como 'DESCONOCIDO'."
+)
+
+periodos_disponibles_sankey = sorted(filtrado["PeriodoBanner_Sales"].unique())
+if len(periodos_disponibles_sankey) < 2:
+    st.info("Se necesitan al menos 2 periodos (con los filtros activos) para comparar consultores.")
+else:
+    col_periodo_origen, col_periodo_destino, col_consultor_sankey = st.columns(3)
+    with col_periodo_origen:
+        periodo_origen_sel = st.selectbox(
+            "Periodo origen", periodos_disponibles_sankey, index=0, key="periodo_origen_sankey",
+        )
+    with col_periodo_destino:
+        periodo_destino_sel = st.selectbox(
+            "Periodo destino", periodos_disponibles_sankey,
+            index=len(periodos_disponibles_sankey) - 1, key="periodo_destino_sankey",
+        )
+
+    def _consultor_o_desconocido(serie):
+        return serie.fillna("DESCONOCIDO").astype(str).str.strip().replace("", "DESCONOCIDO")
+
+    def _hex_a_rgba(hex_color, alpha):
+        hex_color = hex_color.lstrip("#")
+        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        return f"rgba({r},{g},{b},{alpha})"
+
+    origen_df = filtrado[filtrado["PeriodoBanner_Sales"] == periodo_origen_sel].copy()
+    destino_df = filtrado[filtrado["PeriodoBanner_Sales"] == periodo_destino_sel].copy()
+    origen_df["consultor"] = _consultor_o_desconocido(origen_df["consultor"])
+    destino_df["consultor"] = _consultor_o_desconocido(destino_df["consultor"])
+
+    with col_consultor_sankey:
+        consultores_disponibles_sankey = sorted(
+            set(origen_df["consultor"].unique()) | set(destino_df["consultor"].unique())
+        )
+        consultor_sankey_sel = st.multiselect(
+            "Consultor (origen o destino)",
+            consultores_disponibles_sankey,
+            key="consultor_sankey",
+            help="Filtra la transición a los flujos donde el consultor aparece en el periodo origen o "
+            "en el periodo destino. Filtro exclusivo de este gráfico -- no afecta las demás secciones "
+            "de la página.",
+        )
+
+    if periodo_origen_sel == periodo_destino_sel:
+        st.info("Elige dos periodos distintos para comparar la transición de consultores.")
+    else:
+        # "first" para consultor: un colegio con varias cuentas Banner en el mismo periodo
+        # normalmente comparte consultor entre ellas (ver etl/build_documentados_colegios.py);
+        # documentados sí se suma entre esas cuentas.
+        origen_colegio = origen_df.groupby("codigo_colegio").agg(
+            consultor=("consultor", "first"), documentados=("documentados", "sum"),
+        )
+        destino_colegio = destino_df.groupby("codigo_colegio").agg(
+            consultor=("consultor", "first"), documentados=("documentados", "sum"),
+        )
+        colegios_comunes = origen_colegio.index.intersection(destino_colegio.index)
+
+        if len(colegios_comunes) == 0:
+            st.info("No hay colegios en común entre el periodo origen y el periodo destino con estos filtros.")
+        else:
+            transicion = pd.DataFrame({
+                "codigo_colegio": colegios_comunes,
+                "consultor_origen": origen_colegio.loc[colegios_comunes, "consultor"].values,
+                "consultor_destino": destino_colegio.loc[colegios_comunes, "consultor"].values,
+                "documentados_origen": origen_colegio.loc[colegios_comunes, "documentados"].values,
+                "documentados_destino": destino_colegio.loc[colegios_comunes, "documentados"].values,
+            })
+            if consultor_sankey_sel:
+                transicion = transicion[
+                    transicion["consultor_origen"].isin(consultor_sankey_sel)
+                    | transicion["consultor_destino"].isin(consultor_sankey_sel)
+                ]
+
+            if transicion.empty:
+                st.info("Ningún colegio coincide con el consultor seleccionado, en el periodo origen o destino.")
+            else:
+                enlaces = (
+                    transicion.groupby(["consultor_origen", "consultor_destino"])
+                    .agg(
+                        colegios=("codigo_colegio", "nunique"),
+                        documentados_origen=("documentados_origen", "sum"),
+                        documentados_destino=("documentados_destino", "sum"),
+                    )
+                    .reset_index()
+                )
+
+                consultores_origen = sorted(enlaces["consultor_origen"].unique().tolist())
+                consultores_destino = sorted(enlaces["consultor_destino"].unique().tolist())
+                etiquetas_nodos = (
+                    [f"{c} · {periodo_origen_sel}" for c in consultores_origen]
+                    + [f"{c} · {periodo_destino_sel}" for c in consultores_destino]
+                )
+                indice_origen = {c: i for i, c in enumerate(consultores_origen)}
+                indice_destino = {c: i + len(consultores_origen) for i, c in enumerate(consultores_destino)}
+
+                # Mismo color para un consultor en origen y destino; "DESCONOCIDO" siempre gris.
+                PALETA_SANKEY = [
+                    COLOR_PRIMARIO, COLOR_TERCIARIO, COLOR_EXITO, "#D4A373", COLOR_ALERTA, "#315A7D", "#73A580",
+                ]
+                consultores_unicos = sorted((set(consultores_origen) | set(consultores_destino)) - {"DESCONOCIDO"})
+                color_consultor_sankey = {
+                    consultor: PALETA_SANKEY[i % len(PALETA_SANKEY)]
+                    for i, consultor in enumerate(consultores_unicos)
+                }
+                color_consultor_sankey["DESCONOCIDO"] = COLOR_SECUNDARIO
+                colores_nodos = (
+                    [color_consultor_sankey[c] for c in consultores_origen]
+                    + [color_consultor_sankey[c] for c in consultores_destino]
+                )
+
+                # Colegios/documentados por nodo, para el hover (suma de los enlaces que tocan ese nodo).
+                colegios_por_origen = enlaces.groupby("consultor_origen")["colegios"].sum()
+                doc_por_origen = enlaces.groupby("consultor_origen")["documentados_origen"].sum()
+                colegios_por_destino = enlaces.groupby("consultor_destino")["colegios"].sum()
+                doc_por_destino = enlaces.groupby("consultor_destino")["documentados_destino"].sum()
+                customdata_nodos = (
+                    [[colegios_por_origen[c], doc_por_origen[c]] for c in consultores_origen]
+                    + [[colegios_por_destino[c], doc_por_destino[c]] for c in consultores_destino]
+                )
+
+                fig_sankey = go.Figure(go.Sankey(
+                    arrangement="snap",
+                    # Letra de los nombres de consultor más grande y oscura para que se
+                    # distingan bien sobre el fondo, sin depender del color de la cinta.
+                    textfont=dict(size=15, color="#14171A", family="Century Gothic, Segoe UI, sans-serif"),
+                    node=dict(
+                        label=etiquetas_nodos,
+                        color=colores_nodos,
+                        customdata=customdata_nodos,
+                        hovertemplate=(
+                            "%{label}<br>Colegios: %{customdata[0]:,.0f}<br>"
+                            "Documentados: %{customdata[1]:,.0f}<extra></extra>"
+                        ),
+                        pad=18, thickness=20,
+                        line=dict(color="white", width=1),
+                    ),
+                    link=dict(
+                        # El grosor de la cinta representa documentados (destino), no colegios --
+                        # colegios y documentados de origen quedan solo como dato adicional en el hover.
+                        source=[indice_origen[c] for c in enlaces["consultor_origen"]],
+                        target=[indice_destino[c] for c in enlaces["consultor_destino"]],
+                        value=enlaces["documentados_destino"],
+                        color=[_hex_a_rgba(color_consultor_sankey[c], 0.45) for c in enlaces["consultor_origen"]],
+                        customdata=enlaces[["colegios", "documentados_origen"]],
+                        hovertemplate=(
+                            "%{source.label} → %{target.label}<br>"
+                            "Documentados destino (ancho de la cinta): %{value:,.0f}<br>"
+                            "Documentados origen: %{customdata[1]:,.0f}<br>"
+                            "Colegios: %{customdata[0]:,.0f}<extra></extra>"
+                        ),
+                    ),
+                ))
+                fig_sankey.update_layout(
+                    template="plotly_white",
+                    font=dict(size=12),
+                    margin=dict(l=10, r=10, t=20, b=10),
+                    height=480,
+                )
+                st.plotly_chart(fig_sankey, width="stretch")
+
+consultor_valido = filtrado.dropna(subset=["consultor"])
+if consultor_valido.empty:
+    st.info("No hay datos de consultor para estos filtros.")
+else:
+    # --- Detalle: periodo x consultor x colegio, con los mismos filtros de arriba ---
+    st.markdown("**Detalle por periodo, consultor y colegio**")
+    st.caption(
+        "Un colegio puede aparecer más de una vez en el mismo periodo/consultor si tiene varias "
+        "cuentas Banner con ese consultor -- documentados se suma entre esas cuentas."
+    )
+    tabla_consultor_colegio = (
+        consultor_valido
+        .groupby(["PeriodoBanner_Sales", "consultor", "codigo_colegio"])
+        .agg(
+            nombre_institucion=("nombre_institucion", "first"),
+            documentados=("documentados", "sum"),
+            graduados_total=("graduados_total", "first"),
+        )
+        .reset_index()
+    )
+    graduados_seguro_detalle = tabla_consultor_colegio["graduados_total"].mask(
+        tabla_consultor_colegio["graduados_total"] == 0
+    )
+    tabla_consultor_colegio["captacion_pct"] = (
+        tabla_consultor_colegio["documentados"] / graduados_seguro_detalle * 100
+    ).round(1)
+    tabla_consultor_colegio = tabla_consultor_colegio.sort_values(
+        ["PeriodoBanner_Sales", "consultor", "documentados"], ascending=[True, True, False]
+    ).rename(columns={
+        "PeriodoBanner_Sales": "Periodo", "consultor": "Consultor",
+        "nombre_institucion": "Colegio", "graduados_total": "Graduados",
+        "documentados": "Documentados", "captacion_pct": "% Captación",
+    })[["Periodo", "Consultor", "Colegio", "Graduados", "Documentados", "% Captación"]]
+
+    st.dataframe(
+        tabla_consultor_colegio.style.format(
+            {"Graduados": "{:,.0f}", "Documentados": "{:,.0f}", "% Captación": "{:.1f}%"}, na_rep="—"
+        ),
+        width="stretch", height=400, hide_index=True,
+    )
+
+
+##################################
+# --- Captación vs. consultor: ¿cambio de consultor o causas externas? ---
+##################################
+st.subheader("Captación vs. consultor: ¿cambio de consultor o causas externas?")
+st.caption(
+    "Solo cuentas Banner (HomologadoCodBannerColegio) que tuvieron más de un consultor entre los "
+    "periodos filtrados arriba -- esa cuenta, no el nombre del colegio, es el identificador real del "
+    "consultor: un mismo colegio (AMIE) puede tener varias cuentas Banner con consultores distintos "
+    "en el mismo periodo, y agrupar por nombre las mezclaría. El color de cada punto es el consultor "
+    "a cargo en ese periodo; la línea sigue el % de captación de esa cuenta. Si la caída coincide con "
+    "un cambio de color, apunta a la gestión del consultor; si cae sin que cambie el color, apunta a "
+    "otra causa (mercado, oferta, etc.). Los datos de consultor solo existen desde el periodo 202420 "
+    "en adelante."
+)
+
+# Cuentas Banner con más de un consultor distinto entre los periodos filtrados arriba.
+# Se usa cod_banner_colegio, no codigo_colegio ni nombre_institucion: un mismo colegio
+# puede tener varias cuentas Banner, cada una con su propio consultor.
+consultor_por_cuenta = (
+    filtrado.dropna(subset=["consultor"]).groupby("cod_banner_colegio")["consultor"].nunique()
+)
+cuentas_cambio_consultor = consultor_por_cuenta[consultor_por_cuenta > 1].index
+
+if len(cuentas_cambio_consultor) == 0:
+    st.info("Ninguna cuenta Banner (con los filtros activos) tuvo más de un consultor entre periodos.")
+else:
+    base_cambio_todas = filtrado[
+        filtrado["cod_banner_colegio"].isin(cuentas_cambio_consultor)
+    ].dropna(subset=["consultor"]).copy()
+
+    # Etiqueta legible por cuenta Banner: nombre + código, porque el mismo nombre de
+    # colegio puede repetirse en más de una cuenta Banner.
+    nombre_por_cuenta = (
+        base_cambio_todas.sort_values("PeriodoBanner_Sales")
+        .groupby("cod_banner_colegio")["nombre_institucion"].first()
+    )
+    base_cambio_todas["etiqueta_cuenta"] = base_cambio_todas["cod_banner_colegio"].map(
+        lambda cb: f"{nombre_por_cuenta.get(cb, 'Sin nombre')} — cuenta {cb}"
+    )
+
+    etiquetas_cambio = sorted(base_cambio_todas["etiqueta_cuenta"].unique().tolist())
+    cuentas_cambio_sel = st.multiselect(
+        "Cuenta Banner que cambió de consultor",
+        etiquetas_cambio,
+        help="Solo lista cuentas Banner (HomologadoCodBannerColegio) con más de un consultor distinto "
+        "entre los periodos filtrados arriba. Filtro exclusivo de este gráfico -- no afecta las demás "
+        "secciones de la página.",
+    )
+
+    N_CUENTAS_CAMBIO_DEFAULT = 5
+    etiquetas_grafico = cuentas_cambio_sel if cuentas_cambio_sel else etiquetas_cambio[:N_CUENTAS_CAMBIO_DEFAULT]
+    if not cuentas_cambio_sel and len(etiquetas_cambio) > N_CUENTAS_CAMBIO_DEFAULT:
+        st.caption(
+            f"{len(etiquetas_cambio)} cuentas Banner cambiaron de consultor con estos filtros -- "
+            f"mostrando las primeras {N_CUENTAS_CAMBIO_DEFAULT}. Selecciona cuentas específicas arriba "
+            "para ver otras."
+        )
+
+    base_cambio = base_cambio_todas[base_cambio_todas["etiqueta_cuenta"].isin(etiquetas_grafico)].copy()
+    graduados_seguro_cambio = base_cambio["graduados_total"].mask(base_cambio["graduados_total"] == 0)
+    base_cambio["captacion_pct"] = (base_cambio["documentados"] / graduados_seguro_cambio * 100).round(1)
+
+    # Paleta de consultor acotada a esta vista (cuentas con cambio de consultor) --
+    # independiente de la paleta de la sección anterior, que está acotada al top
+    # nacional por documentados y puede incluir consultores distintos.
+    consultores_en_vista = sorted(base_cambio["consultor"].dropna().unique().tolist())
+    PALETA_CONSULTOR_CAMBIO = [
+        COLOR_PRIMARIO, COLOR_TERCIARIO, COLOR_EXITO, "#D4A373", COLOR_ALERTA, "#315A7D", "#73A580",
+    ]
+    color_consultor_vista = {
+        consultor: PALETA_CONSULTOR_CAMBIO[i % len(PALETA_CONSULTOR_CAMBIO)]
+        for i, consultor in enumerate(consultores_en_vista)
+    }
+
+    fig_cambio = go.Figure()
+    for etiqueta_cuenta, grupo in base_cambio.groupby("etiqueta_cuenta"):
+        grupo = grupo.sort_values("PeriodoBanner_Sales")
+        fig_cambio.add_trace(go.Scatter(
+            x=grupo["PeriodoBanner_Sales"], y=grupo["captacion_pct"],
+            mode="lines+markers", name=etiqueta_cuenta, showlegend=False,
+            line=dict(width=1.6, color=COLOR_SECUNDARIO, dash="dot"),
+            marker=dict(
+                size=10,
+                color=[color_consultor_vista.get(c, COLOR_SECUNDARIO) for c in grupo["consultor"]],
+                line=dict(width=1, color="white"),
+            ),
+            customdata=grupo[["consultor", "documentados", "graduados_total"]],
+            hovertemplate=(
+                f"{etiqueta_cuenta}<br>Periodo: " + "%{x}<br>% Captación: %{y:.1f}%<br>"
+                "Consultor: %{customdata[0]}<br>Documentados: %{customdata[1]:,.0f} / "
+                "Graduados: %{customdata[2]:,.0f}<extra></extra>"
+            ),
+        ))
+    # Leyenda manual de consultor (el color va en los marcadores, no en las líneas por cuenta).
+    for consultor_nombre, color in color_consultor_vista.items():
+        fig_cambio.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            marker=dict(size=9, color=color), name=f"Consultor: {consultor_nombre}",
+        ))
+    fig_cambio.update_layout(
+        template="plotly_white",
+        yaxis_title="% Captación",
+        hovermode="closest",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=10, r=10, t=40, b=10),
+        height=460,
+    )
+    st.plotly_chart(fig_cambio, width="stretch")
+
+
+##################################
 # --- Tabla anual (solo periodo 10): valores + % de variación interanual ---
 ##################################
 st.subheader("Tabla anual (solo periodo 10)")
@@ -290,11 +636,21 @@ filtrado_p10["anio"] = filtrado_p10["PeriodoBanner_Sales"].str[:4]
 if filtrado_p10.empty:
     st.info("No hay datos de periodo 10 para este filtro.")
 else:
+    # graduados_total se repite por consultor dentro del mismo (anio, colegio) --
+    # se colapsa primero con "first" para no duplicarlo al sumar por año.
     por_anio = (
-        filtrado_p10.groupby("anio")
+        filtrado_p10.groupby(["anio", "codigo_colegio"])
+        .agg(
+            graduados=("graduados_total", "first"),
+            leads=("leads", "sum"),
+            afluentes=("afluentes", "sum"),
+            documentados=("documentados", "sum"),
+        )
+        .reset_index()
+        .groupby("anio")
         .agg(
             colegios=("codigo_colegio", "nunique"),
-            graduados=("graduados_total", "sum"),
+            graduados=("graduados", "sum"),
             leads=("leads", "sum"),
             afluentes=("afluentes", "sum"),
             documentados=("documentados", "sum"),
@@ -349,11 +705,21 @@ filtrado_p20["anio"] = filtrado_p20["PeriodoBanner_Sales"].str[:4]
 if filtrado_p20.empty:
     st.info("No hay datos de periodo 20 para este filtro.")
 else:
+    # graduados_total se repite por consultor dentro del mismo (anio, colegio) --
+    # se colapsa primero con "first" para no duplicarlo al sumar por año.
     por_anio_p20 = (
-        filtrado_p20.groupby("anio")
+        filtrado_p20.groupby(["anio", "codigo_colegio"])
+        .agg(
+            graduados=("graduados_total", "first"),
+            leads=("leads", "sum"),
+            afluentes=("afluentes", "sum"),
+            documentados=("documentados", "sum"),
+        )
+        .reset_index()
+        .groupby("anio")
         .agg(
             colegios=("codigo_colegio", "nunique"),
-            graduados=("graduados_total", "sum"),
+            graduados=("graduados", "sum"),
             leads=("leads", "sum"),
             afluentes=("afluentes", "sum"),
             documentados=("documentados", "sum"),

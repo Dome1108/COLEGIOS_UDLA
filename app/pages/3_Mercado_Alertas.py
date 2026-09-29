@@ -34,7 +34,7 @@ if ANIO_BASE not in anios_disponibles:
 ##########################
 ## TRAIGO LOS CAMPOS
 ##########################
-cols_filtro = st.columns([2, 1.3, 1.3, 1, 1, 1, 1])
+cols_filtro = st.columns([2, 1.3, 1.3, 1, 1, 1, 1, 1])
 with cols_filtro[0]:
     colegios_nombres = sorted(resumen["nombre_institucion"].dropna().unique().tolist())
     colegio_sel = st.multiselect("Colegio", colegios_nombres)
@@ -64,6 +64,9 @@ with cols_filtro[5]:
 with cols_filtro[6]:
     rangos_pension = sorted(resumen["rango_pension"].dropna().unique().tolist())
     rango_pension_sel = st.multiselect("Rango pensión", rangos_pension)
+with cols_filtro[7]:
+    consultores = sorted(resumen["consultor"].dropna().unique().tolist())
+    consultor_sel = st.multiselect("Consultor", consultores)
 
 
 ##############################
@@ -82,6 +85,7 @@ for col, sel in [
     ("nombre_institucion", colegio_sel),
     ("provincia", provincia_sel), ("sostenimiento", sostenimiento_sel),
     ("cluster", cluster_sel), ("rango_pension", rango_pension_sel),
+    ("consultor", consultor_sel),
 ]:
     if sel:
         filtrado = filtrado[filtrado[col].isin(sel)]
