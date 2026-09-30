@@ -22,6 +22,10 @@ pagina = st.navigation(
             "pages/3_Mercado_Alertas.py",
             title="Mercado Alertas",
         ),
+        st.Page(
+            "pages/4_Concentracion_Colegios.py",
+            title="Concentración por colegio",
+        ),
     ]
 )
 
